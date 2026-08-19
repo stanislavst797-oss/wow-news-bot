@@ -44,6 +44,15 @@ IMG_SRC_RE = re.compile(r"<img[^>]+src\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE
 TAG_RE = re.compile(r"<[^>]+>")
 WS_RE = re.compile(r"\s+")
 
+# Ответы Discord, после которых повторять бессмысленно: вебхук удалён,
+# перевыпущен или запрещён. Такой отказ должен красить прогон в красный,
+# иначе постинг умрёт молча — в канале тишина, а в Actions «успешно».
+FATAL_WEBHOOK_CODES = (401, 403, 404)
+
+
+class WebhookBroken(Exception):
+    """Вебхук нерабочий — чинится только заменой секрета DISCORD_WEBHOOK."""
+
 
 def setup_logging():
     for stream in (sys.stdout, sys.stderr):
@@ -231,6 +240,13 @@ def post_embed(webhook, embed, cfg, dry_run=False):
             time.sleep(2 * attempt)
             continue
 
+        if resp.status_code in FATAL_WEBHOOK_CODES:
+            raise WebhookBroken(
+                "Discord ответил %s — вебхук недействителен. "
+                "Пересоздайте его в настройках канала и обновите секрет DISCORD_WEBHOOK. Ответ: %s"
+                % (resp.status_code, resp.text[:200])
+            )
+
         logging.error("Discord отказал: %s %s", resp.status_code, resp.text[:300])
         return False
 
@@ -290,7 +306,15 @@ def run():
     sent = 0
     for index, entry in enumerate(to_send):
         embed = build_embed(entry, cfg)
-        if not post_embed(webhook, embed, cfg, dry_run):
+        try:
+            ok = post_embed(webhook, embed, cfg, dry_run)
+        except WebhookBroken as exc:
+            # Молчать нельзя: пусть прогон будет красным и GitHub пришлёт уведомление.
+            logging.error("%s", exc)
+            save_posted(posted, cfg["history_size"])
+            logging.error("отправлено до сбоя: %s", sent)
+            return 1
+        if not ok:
             logging.error("прерываюсь, остаток уйдёт в следующий прогон")
             break
         sent += 1
