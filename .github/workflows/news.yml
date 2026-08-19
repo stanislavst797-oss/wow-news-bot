@@ -32,9 +32,10 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: 'pip'
 
       - name: Install deps
-        run: python -m pip install --quiet --upgrade feedparser requests
+        run: python -m pip install --quiet -r requirements.txt
 
       - name: Run bot
         env:
