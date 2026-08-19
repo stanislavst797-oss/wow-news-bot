@@ -1,0 +1,25 @@
+# Секреты — вебхук живёт в GitHub Secrets, а не в репозитории
+.env
+.env.*
+*.secret
+secrets.json
+webhook.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Временные файлы бота
+posted.json.tmp
+*.log
+feed.xml
+
+# Мусор ОС и редакторов
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

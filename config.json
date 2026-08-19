@@ -1,0 +1,21 @@
+{
+  "feed_url": "https://www.noob-club.ru/rss2.xml",
+  "stop_words": [
+    "Diablo",
+    "Диабло",
+    "Overwatch",
+    "Овервотч",
+    "Hearthstone",
+    "Хартстоун",
+    "StarCraft",
+    "Старкрафт",
+    "Rumble"
+  ],
+  "max_per_run": 5,
+  "history_size": 500,
+  "description_limit": 300,
+  "embed_color": 10038562,
+  "footer_text": "noob-club.ru",
+  "delay_between_posts": 1.0,
+  "request_timeout": 30
+}
