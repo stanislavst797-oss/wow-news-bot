@@ -2,8 +2,10 @@ name: WoW news to Discord
 
 on:
   schedule:
-    # Смещённые минуты намеренно: на ровных :00 очередь GitHub перегружена.
-    - cron: '7,22,37,52 * * * *'
+    # 5 минут — минимально допустимый интервал в GitHub Actions.
+    # Расписание тут best-effort: часть срабатываний GitHub пропускает,
+    # поэтому чем чаще просим, тем меньше реальная задержка.
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -53,10 +55,17 @@ jobs:
           git commit -m "state: обновление posted.json [skip ci]"
           for attempt in 1 2 3; do
             if git push; then
+              echo "состояние сохранено"
               exit 0
             fi
             echo "push не прошёл (попытка $attempt) — подтягиваю удалённые изменения"
-            git pull --rebase --autostash
+            if ! git pull --rebase --autostash; then
+              # Оставить репозиторий в середине незавершённого rebase нельзя:
+              # следующая попытка push молча ушла бы в никуда.
+              git rebase --abort || true
+              echo "::error::конфликт по posted.json, состояние не сохранено — следующий прогон может повторить одну новость"
+              exit 1
+            fi
           done
           git push
 
