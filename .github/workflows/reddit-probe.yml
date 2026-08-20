@@ -2,8 +2,18 @@ name: Reddit probe (диагностика)
 
 # Разовая проверка: пускает ли Reddit раннеры GitHub (Azure) к RSS.
 # Локальная проверка тут ничего не значит — нужен именно этот IP.
+# Если бот трансмогов начнёт краснеть с «Reddit ответил 403» — запустите это
+# и посмотрите, что именно приходит.
+#
+# Дополнительно: если указать message_id, покажет, какие превью Discord
+# построил для этого сообщения (тип, есть ли видео/картинка).
 on:
   workflow_dispatch:
+    inputs:
+      message_id:
+        description: 'ID сообщения в канале трансмогов — покажет его превью'
+        required: false
+        default: ''
 
 jobs:
   probe:
@@ -18,43 +28,54 @@ jobs:
       - name: Install deps
         run: python -m pip install --quiet 'requests~=2.34'
 
-      - name: Кто мы с точки зрения сети
-        run: |
-          echo "публичный IP раннера:"
-          curl -s --max-time 15 https://api.ipify.org || echo "(не определился)"
-          echo
-
       - name: Запрос к Reddit
+        if: ${{ inputs.message_id == '' }}
         run: |
           python - <<'PY'
-          import json, sys, requests
+          import requests
 
           UA = "discord-transmog-bot/1.0"
-          URLS = [
-              "https://www.reddit.com/r/Transmogrification/top.rss?t=day",
-              "https://old.reddit.com/r/Transmogrification/top.rss?t=day",
-          ]
+          URL = "https://www.reddit.com/r/Transmogrification/top.rss?t=day"
+          print("GET", URL)
+          r = requests.get(URL, headers={"User-Agent": UA}, timeout=30)
+          print("  статус:", r.status_code)
+          print("  content-type:", r.headers.get("Content-Type"))
+          print("  длина:", len(r.content), "байт")
+          for h in ("retry-after", "server", "cf-mitigated"):
+              if h in r.headers:
+                  print(f"  {h}: {r.headers[h]}")
+          print("  начало тела:", r.text[:300].replace("\n", " "))
+          low = r.text.lower()
+          for marker in ("whoa there", "captcha", "blocked", "too many requests", "<entry"):
+              if marker in low:
+                  print("  МАРКЕР:", marker)
+          PY
 
-          for url in URLS:
-              print("=" * 70)
-              print("GET", url)
-              try:
-                  r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
-              except Exception as exc:
-                  print("  ИСКЛЮЧЕНИЕ:", type(exc).__name__, exc)
-                  continue
-              print("  статус:", r.status_code)
-              print("  content-type:", r.headers.get("Content-Type"))
-              print("  длина:", len(r.content), "байт")
-              for h in ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after",
-                        "server", "cf-mitigated", "x-served-by"):
-                  if h in r.headers:
-                      print(f"  {h}: {r.headers[h]}")
-              body = r.text[:600].replace("\n", " ")
-              print("  начало тела:", body[:400])
-              low = r.text.lower()
-              for marker in ("whoa there", "captcha", "blocked", "access denied",
-                             "too many requests", "<entry", "<feed"):
-                  if marker in low:
-                      print("  МАРКЕР:", marker)
+      - name: Разбор превью сообщения
+        if: ${{ inputs.message_id != '' }}
+        env:
+          TRANSMOG_WEBHOOK: ${{ secrets.TRANSMOG_WEBHOOK }}
+          MESSAGE_ID: ${{ inputs.message_id }}
+        run: |
+          python - <<'PY'
+          import json, os, requests
+
+          hook = os.environ["TRANSMOG_WEBHOOK"].rstrip("/")
+          mid = os.environ["MESSAGE_ID"]
+          r = requests.get(f"{hook}/messages/{mid}", timeout=30)
+          print("статус:", r.status_code)
+          data = r.json()
+          embeds = data.get("embeds") or []
+          print("превью всего:", len(embeds))
+          for i, e in enumerate(embeds, 1):
+              print(f"--- превью {i} ---")
+              print("  type:      ", e.get("type"))
+              print("  provider:  ", (e.get("provider") or {}).get("name"))
+              print("  title:     ", (e.get("title") or "")[:70])
+              print("  url:       ", (e.get("url") or "")[:90])
+              for key in ("image", "thumbnail", "video"):
+                  block = e.get(key)
+                  if block:
+                      print(f"  {key}: url={str(block.get('url'))[:80]} "
+                            f"{block.get('width')}x{block.get('height')}")
           PY
