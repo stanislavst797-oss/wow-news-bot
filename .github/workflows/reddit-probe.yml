@@ -1,0 +1,60 @@
+name: Reddit probe (диагностика)
+
+# Разовая проверка: пускает ли Reddit раннеры GitHub (Azure) к RSS.
+# Локальная проверка тут ничего не значит — нужен именно этот IP.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: python -m pip install --quiet 'requests~=2.34'
+
+      - name: Кто мы с точки зрения сети
+        run: |
+          echo "публичный IP раннера:"
+          curl -s --max-time 15 https://api.ipify.org || echo "(не определился)"
+          echo
+
+      - name: Запрос к Reddit
+        run: |
+          python - <<'PY'
+          import json, sys, requests
+
+          UA = "discord-transmog-bot/1.0"
+          URLS = [
+              "https://www.reddit.com/r/Transmogrification/top.rss?t=day",
+              "https://old.reddit.com/r/Transmogrification/top.rss?t=day",
+          ]
+
+          for url in URLS:
+              print("=" * 70)
+              print("GET", url)
+              try:
+                  r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+              except Exception as exc:
+                  print("  ИСКЛЮЧЕНИЕ:", type(exc).__name__, exc)
+                  continue
+              print("  статус:", r.status_code)
+              print("  content-type:", r.headers.get("Content-Type"))
+              print("  длина:", len(r.content), "байт")
+              for h in ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after",
+                        "server", "cf-mitigated", "x-served-by"):
+                  if h in r.headers:
+                      print(f"  {h}: {r.headers[h]}")
+              body = r.text[:600].replace("\n", " ")
+              print("  начало тела:", body[:400])
+              low = r.text.lower()
+              for marker in ("whoa there", "captcha", "blocked", "access denied",
+                             "too many requests", "<entry", "<feed"):
+                  if marker in low:
+                      print("  МАРКЕР:", marker)
+          PY
