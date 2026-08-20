@@ -43,7 +43,12 @@ jobs:
 
       - name: Run tier list bot
         env:
+          # По одному секрету на роль. Имя переменной для каждой роли задано
+          # полем webhook_env в tierlist_config.json — добавляя роль, добавьте
+          # и строку сюда.
           TIERLIST_WEBHOOK: ${{ secrets.TIERLIST_WEBHOOK }}
+          TANK_WEBHOOK: ${{ secrets.TANK_WEBHOOK }}
+          HEALER_WEBHOOK: ${{ secrets.HEALER_WEBHOOK }}
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
         run: python tierlist.py
@@ -54,10 +59,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tierlist-screenshot
+          name: tierlist-screenshots
           path: |
-            tierlist.png
-            rankings.png
+            tierlist-*.png
+            rankings-*.png
           if-no-files-found: warn
           retention-days: 30
 

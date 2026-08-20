@@ -1,42 +1,71 @@
 {
-  "url": "https://www.archon.gg/wow/tier-list/dps-rankings/mythic-plus/10/all-dungeons/this-week",
-  "caption_title": "Тир-лист Mythic+ · ключи +7 и выше · все подземелья · за 14 дней",
-  "source_name": "Archon.gg",
+  "_комментарий": "targets — список ролей. Чтобы добавить четвёртую, допишите объект сюда, код править не нужно. Поля цели перекрывают одноимённые из defaults.",
 
-  "section_selector": ".builds-tier-list-section",
-  "tier_selector": ".builds-tier-list-section__tier-heading",
-  "spec_selector": ".builds-tier-list-section__spec-contents",
-  "label_selector": ".builds-tier-list-section__spec-label",
-
-  "rankings_selector": "table.react-table",
-  "rankings_rows": 15,
-  "min_rankings_rows": 8,
-
-  "ad_selectors": [
-    "[class*=\"AdPlacement\"]",
-    "[class*=\"stickyFooterAd\"]",
-    "[class*=\"PlaywireAd\"]",
-    "[class*=\"Advertisements_\"]",
-    "[class*=\"containerSidebar\"]",
-    "iframe[src*=\"ads\"]",
-    "iframe[src*=\"doubleclick\"]"
+  "targets": [
+    {
+      "role": "dps",
+      "name": "ДД",
+      "url": "https://www.archon.gg/wow/tier-list/dps-rankings/mythic-plus/10/all-dungeons/this-week",
+      "webhook_env": "TIERLIST_WEBHOOK",
+      "caption_title": "Тир-лист Mythic+ · ДД · ключи +7 и выше · все подземелья · за 14 дней",
+      "min_specs": 15,
+      "min_rankings_rows": 8
+    },
+    {
+      "role": "tank",
+      "name": "танки",
+      "url": "https://www.archon.gg/wow/tier-list/tank-rankings/mythic-plus/10/all-dungeons/this-week",
+      "webhook_env": "TANK_WEBHOOK",
+      "caption_title": "Тир-лист Mythic+ · танки · ключи +7 и выше · все подземелья · за 14 дней",
+      "min_specs": 5,
+      "min_rankings_rows": 5
+    },
+    {
+      "role": "healer",
+      "name": "хилы",
+      "url": "https://www.archon.gg/wow/tier-list/healer-rankings/mythic-plus/10/all-dungeons/this-week",
+      "webhook_env": "HEALER_WEBHOOK",
+      "caption_title": "Тир-лист Mythic+ · хилы · ключи +7 и выше · все подземелья · за 14 дней",
+      "min_specs": 6,
+      "min_rankings_rows": 6
+    }
   ],
 
-  "viewport_width": 1050,
-  "viewport_height": 1200,
-  "device_scale_factor": 2,
+  "defaults": {
+    "source_name": "Archon.gg",
 
-  "min_tiers": 3,
-  "min_specs": 15,
-  "min_width": 500,
-  "min_height": 250,
-  "min_bytes": 20000,
-  "min_unique_colors": 60,
-  "min_stddev": 12.0,
+    "section_selector": ".builds-tier-list-section",
+    "tier_selector": ".builds-tier-list-section__tier-heading",
+    "spec_selector": ".builds-tier-list-section__spec-contents",
+    "label_selector": ".builds-tier-list-section__spec-label",
+    "rankings_selector": "table.react-table",
+    "rankings_rows": 15,
 
-  "nav_timeout_ms": 60000,
-  "data_timeout_ms": 45000,
-  "ad_wait_ms": 8000,
-  "request_timeout": 60,
-  "embed_color": 10038562
+    "ad_selectors": [
+      "[class*=\"AdPlacement\"]",
+      "[class*=\"stickyFooterAd\"]",
+      "[class*=\"PlaywireAd\"]",
+      "[class*=\"Advertisements_\"]",
+      "[class*=\"containerSidebar\"]",
+      "iframe[src*=\"ads\"]",
+      "iframe[src*=\"doubleclick\"]"
+    ],
+
+    "viewport_width": 1050,
+    "viewport_height": 1200,
+    "device_scale_factor": 2,
+
+    "min_tiers": 3,
+    "min_width": 500,
+    "min_height": 250,
+    "min_bytes": 20000,
+    "min_unique_colors": 60,
+    "min_stddev": 12.0,
+
+    "nav_timeout_ms": 60000,
+    "data_timeout_ms": 45000,
+    "ad_wait_ms": 8000,
+    "request_timeout": 60,
+    "embed_color": 10038562
+  }
 }

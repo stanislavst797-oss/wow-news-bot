@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Ежедневный скриншот тир-листа Mythic+ и таблицы рейтингов с archon.gg в Discord.
+"""Ежедневные скриншоты тир-листов Mythic+ с archon.gg в Discord.
 
-Вебхук читается ТОЛЬКО из переменной окружения TIERLIST_WEBHOOK.
+Роли (ДД, танки, хилы) описаны списком targets в tierlist_config.json — каждая
+со своим url, подписью и именем секрета с вебхуком. Вебхуки читаются ТОЛЬКО
+из переменных окружения, в файлы не попадают. Четвёртая роль добавляется
+правкой конфига, без изменения кода.
 
-Логика публикации: одно сообщение с двумя картинками, которое обновляется
-каждый день. ID лежит в tierlist_state.json. Если сообщение удалили руками —
+Логика публикации: у каждой роли своё сообщение с двумя картинками, которое обновляется
+каждый день. ID ролей лежат в tierlist_state.json. Если сообщение удалили руками —
 создаём новое.
 
 Скриншоты хрупкие, поэтому любая неуверенность в результате — это красный
@@ -29,8 +32,6 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "tierlist_config.json"
 STATE_PATH = ROOT / "tierlist_state.json"
-SHOT_PATH = ROOT / "tierlist.png"
-RANK_PATH = ROOT / "rankings.png"
 
 DEFAULTS = {
     "url": "https://www.archon.gg/wow/tier-list/dps-rankings/mythic-plus/10/all-dungeons/this-week",
@@ -232,26 +233,75 @@ def setup_logging():
 
 
 def load_config():
-    cfg = dict(DEFAULTS)
+    """Возвращает (общие_настройки, список_целей).
+
+    Цель — это роль со своим url, секретом и подписью. Чтобы добавить
+    четвёртую роль, достаточно дописать объект в targets в конфиге.
+    """
+    raw = {}
     if CONFIG_PATH.exists():
         try:
             with CONFIG_PATH.open(encoding="utf-8") as fh:
-                cfg.update(json.load(fh))
+                raw = json.load(fh)
         except (OSError, ValueError) as exc:
             logging.warning("tierlist_config.json не читается (%s), беру умолчания", exc)
+
+    shared = dict(DEFAULTS)
+    shared.update(raw.get("defaults") or {})
+
+    targets = raw.get("targets")
+    if not targets and raw.get("url"):
+        # Конфиг старого формата — одна цель прямо в корне.
+        targets = [dict(raw, role=raw.get("role", "dps"), name=raw.get("name", "ДД"))]
+    if not targets:
+        raise TierListError(
+            "в tierlist_config.json нет ни одной цели: ожидается список targets "
+            "с полями role, url, webhook_env, caption_title"
+        )
+
+    for i, target in enumerate(targets):
+        for field in ("role", "url", "webhook_env", "caption_title"):
+            if not target.get(field):
+                raise TierListError(
+                    "у цели №%s в tierlist_config.json не задано поле «%s»" % (i + 1, field)
+                )
+    return shared, targets
+
+
+def resolve_target(shared, target):
+    """Настройки конкретной роли: общие, поверх них — её собственные."""
+    cfg = dict(shared)
+    cfg.update(target)
+    cfg.setdefault("name", cfg["role"])
     return cfg
 
 
-def load_state():
+def load_state(first_role):
+    """Состояние по ролям: {"roles": {"dps": {"message_id": ...}, ...}}.
+
+    Старый формат (один message_id в корне) переносится на первую роль,
+    чтобы уже существующее сообщение продолжило обновляться, а не создалось заново.
+    """
     if not STATE_PATH.exists():
-        return {}
+        return {"roles": {}}
     try:
         with STATE_PATH.open(encoding="utf-8") as fh:
             data = json.load(fh)
-        return data if isinstance(data, dict) else {}
     except (OSError, ValueError) as exc:
         logging.warning("tierlist_state.json повреждён (%s) — начну с чистого листа", exc)
-        return {}
+        return {"roles": {}}
+
+    if not isinstance(data, dict):
+        return {"roles": {}}
+    if isinstance(data.get("roles"), dict):
+        return data
+    if data.get("message_id"):
+        logging.info(
+            "переношу состояние старого формата: сообщение %s закрепляю за ролью «%s»",
+            data["message_id"], first_role,
+        )
+        return {"roles": {first_role: {k: v for k, v in data.items() if k != "action"}}}
+    return {"roles": {}}
 
 
 def save_state(state):
@@ -431,17 +481,19 @@ def take_screenshots(cfg, tier_path, rank_path):
                 }""",
                 rank_sel,
             )
-            expanded = page.evaluate(JS_EXPAND_ROWS, {"table": rank_sel})
-            if expanded:
+            # У ролей с коротким списком (танки, хилы) кнопки «Show More» нет:
+            # там все строки видны сразу, и это не повод для тревоги.
+            if page.evaluate(JS_EXPAND_ROWS, {"table": rank_sel}):
                 page.wait_for_timeout(800)
-            else:
-                logging.warning(
-                    "кнопка «Show More» не найдена — в кадр попадут только строки, "
-                    "которые сайт показывает сразу"
-                )
             shown = page.evaluate(
                 JS_LIMIT_ROWS, {"table": rank_sel, "limit": cfg["rankings_rows"]}
             )
+            expected = min(table_info["total"], cfg["rankings_rows"])
+            if shown < expected:
+                logging.warning(
+                    "в кадр попало %s строк из ожидаемых %s — список раскрылся не полностью",
+                    shown, expected,
+                )
             logging.info(
                 "секция «%s»: колонки %s, строк всего %s, показываю %s",
                 table_info["heading"], " | ".join(table_info["columns"]),
@@ -520,7 +572,7 @@ def validate_image(path, cfg):
     return width, height
 
 
-def build_embeds(cfg):
+def build_embeds(cfg, names):
     """Два эмбеда с одинаковым url — Discord склеивает такие в одну карточку
     с галереей картинок, поэтому обе уходят одним сообщением."""
     first = {
@@ -528,13 +580,13 @@ def build_embeds(cfg):
         "url": cfg["url"],
         "description": "Источник: [%s](%s)" % (cfg["source_name"], cfg["url"]),
         "color": cfg["embed_color"],
-        "image": {"url": "attachment://tierlist.png"},
+        "image": {"url": "attachment://%s" % names[0]},
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     second = {
         "url": cfg["url"],
         "color": cfg["embed_color"],
-        "image": {"url": "attachment://rankings.png"},
+        "image": {"url": "attachment://%s" % names[1]},
     }
     return [first, second]
 
@@ -542,7 +594,7 @@ def build_embeds(cfg):
 def _multipart(cfg, images):
     """images — список пар (имя файла, байты) в порядке эмбедов."""
     payload = {
-        "embeds": build_embeds(cfg),
+        "embeds": build_embeds(cfg, [name for name, _ in images]),
         "attachments": [
             {"id": i, "filename": name} for i, (name, _) in enumerate(images)
         ],
@@ -623,32 +675,69 @@ def publish(webhook, cfg, images, state):
     return state
 
 
-def run():
-    cfg = load_config()
-    dry_run = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
-    webhook = (os.environ.get("TIERLIST_WEBHOOK") or "").strip().rstrip("/")
-    if not webhook and not dry_run:
-        logging.error("нет переменной окружения TIERLIST_WEBHOOK — отправлять некуда")
-        return 1
+def process_target(cfg, state, dry_run):
+    """Обрабатывает одну роль. Возвращает строку итога для лога."""
+    role = cfg["role"]
+    tier_path = ROOT / ("tierlist-%s.png" % role)
+    rank_path = ROOT / ("rankings-%s.png" % role)
 
-    take_screenshots(cfg, SHOT_PATH, RANK_PATH)
-    for path in (SHOT_PATH, RANK_PATH):
+    webhook = (os.environ.get(cfg["webhook_env"]) or "").strip().rstrip("/")
+    if not webhook and not dry_run:
+        raise TierListError(
+            "нет переменной окружения %s — отправлять некуда. Проверьте, что секрет "
+            "задан в репозитории и проброшен в воркфлоу" % cfg["webhook_env"]
+        )
+
+    take_screenshots(cfg, tier_path, rank_path)
+    for path in (tier_path, rank_path):
         validate_image(path, cfg)
 
     if dry_run:
-        logging.info("DRY-RUN: в Discord ничего не отправляю")
-        return 0
+        return "DRY-RUN, не отправлено"
 
     images = [
-        ("tierlist.png", SHOT_PATH.read_bytes()),
-        ("rankings.png", RANK_PATH.read_bytes()),
+        (tier_path.name, tier_path.read_bytes()),
+        (rank_path.name, rank_path.read_bytes()),
     ]
-    state = load_state()
-    state = publish(webhook, cfg, images, state)
-    state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    state["source_url"] = cfg["url"]
+    role_state = dict(state["roles"].get(role) or {})
+    role_state = publish(webhook, cfg, images, role_state)
+    role_state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    role_state["source_url"] = cfg["url"]
+    state["roles"][role] = role_state
+    # Сохраняем сразу: если следующая роль упадёт, эта не потеряется.
     save_state(state)
-    logging.info("готово: сообщение %s (%s)", state["message_id"], state["action"])
+    return "сообщение %s (%s)" % (role_state["message_id"], role_state["action"])
+
+
+def run():
+    shared, targets = load_config()
+    dry_run = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+    state = load_state(targets[0]["role"])
+    logging.info("ролей к обработке: %s", len(targets))
+
+    results, failures = [], []
+    for target in targets:
+        cfg = resolve_target(shared, target)
+        name = cfg["name"]
+        logging.info("--- роль «%s» (%s) ---", name, cfg["role"])
+        try:
+            outcome = process_target(cfg, state, dry_run)
+            results.append((name, outcome))
+            logging.info("роль «%s»: %s", name, outcome)
+        except Exception as exc:
+            # Одна упавшая роль не должна отменять остальные, но и молча
+            # проглотить её нельзя — соберём и подсветим в конце.
+            failures.append((name, exc))
+            logging.error("роль «%s» не обработана: %s", name, exc)
+
+    logging.info("итог: успешно %s из %s", len(results), len(targets))
+    for name, outcome in results:
+        logging.info("  ok  %s — %s", name, outcome)
+    if failures:
+        for name, exc in failures:
+            logging.error("  СБОЙ %s — %s", name, exc)
+        logging.error("ролей с ошибкой: %s из %s", len(failures), len(targets))
+        return 1
     return 0
 
 

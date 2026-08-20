@@ -25,6 +25,6 @@ desktop.ini
 .idea/
 
 # Скриншот тир-листа — артефакт прогона, не состояние
-tierlist.png
+tierlist-*.png
 tierlist_state.json.tmp
-rankings.png
+rankings-*.png
