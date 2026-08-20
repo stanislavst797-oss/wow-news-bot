@@ -1,0 +1,70 @@
+name: Transmog digest to Discord
+
+on:
+  schedule:
+    # Раз в сутки в 12:00 UTC (15:00 МСК): к этому времени дневное
+    # голосование на Reddit устаканивается. Ровно один запрос к Reddit за прогон.
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Своя группа: этот бот не должен пересекаться с новостным и тир-листами.
+concurrency:
+  group: wow-transmog-bot
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 50
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install deps
+        run: python -m pip install --quiet -r requirements-transmog.txt
+
+      - name: Run transmog bot
+        env:
+          TRANSMOG_WEBHOOK: ${{ secrets.TRANSMOG_WEBHOOK }}
+          PYTHONUTF8: '1'
+          PYTHONIOENCODING: 'utf-8'
+        run: python transmog.py
+
+      - name: Commit transmog_posted.json
+        # always(): если бот упал уже после отправки, историю всё равно надо
+        # сохранить, иначе завтра те же посты уйдут повторно.
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add transmog_posted.json
+          if git diff --staged --quiet; then
+            echo "transmog_posted.json не изменился — коммитить нечего"
+            exit 0
+          fi
+          git commit -m "state: обновление transmog_posted.json [skip ci]"
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "состояние сохранено"
+              exit 0
+            fi
+            echo "push не прошёл (попытка $attempt) — подтягиваю удалённые изменения"
+            if ! git pull --rebase --autostash; then
+              git rebase --abort || true
+              echo "::error::конфликт по transmog_posted.json, состояние не сохранено"
+              exit 1
+            fi
+          done
+          git push

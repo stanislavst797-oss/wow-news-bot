@@ -1,0 +1,12 @@
+{
+  "feed_url": "https://www.reddit.com/r/Transmogrification/top.rss?t=day",
+  "user_agent": "discord-transmog-bot/1.0",
+  "count": 5,
+  "history_size": 500,
+  "header": "**Трансмоги дня · r/Transmogrification**",
+  "message_mode": "single",
+  "request_timeout": 30,
+  "delay_between_posts": 1.0,
+  "embed_check_delay": 4.0,
+  "verify_embeds": true
+}
