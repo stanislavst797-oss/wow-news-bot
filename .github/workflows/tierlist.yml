@@ -2,10 +2,10 @@ name: Mythic+ tier list to Discord
 
 on:
   schedule:
-    # Среда, 12:00 UTC (15:00 МСК) — заметно позже сброса EU (среда, 03:00 UTC),
-    # чтобы за новую неделю успели набраться данные для тир-листа.
+    # Ежедневно в 06:00 UTC (09:00 МСК). Archon пересчитывает данные несколько раз
+    # в сутки («Last updated: N hours ago»), поэтому недельный снимок устаревал бы.
     # Задержка планировщика GitHub тут роли не играет.
-    - cron: '0 12 * * 3'
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -48,14 +48,16 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
         run: python tierlist.py
 
-      - name: Upload screenshot
-        # always(): именно на упавшем прогоне картинка нужнее всего —
-        # видно, что снялось вместо тир-листа.
+      - name: Upload screenshots
+        # always(): именно на упавшем прогоне картинки нужнее всего —
+        # видно, что снялось вместо тир-листа и таблицы.
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tierlist-screenshot
-          path: tierlist.png
+          path: |
+            tierlist.png
+            rankings.png
           if-no-files-found: warn
           retention-days: 30
 

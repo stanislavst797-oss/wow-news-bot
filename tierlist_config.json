@@ -1,12 +1,26 @@
 {
   "url": "https://www.archon.gg/wow/tier-list/dps-rankings/mythic-plus/10/all-dungeons/this-week",
-  "caption_title": "Тир-лист Mythic+ · +10 · все подземелья · за неделю",
+  "caption_title": "Тир-лист Mythic+ · ключи +7 и выше · все подземелья · за 14 дней",
   "source_name": "Archon.gg",
 
   "section_selector": ".builds-tier-list-section",
   "tier_selector": ".builds-tier-list-section__tier-heading",
   "spec_selector": ".builds-tier-list-section__spec-contents",
   "label_selector": ".builds-tier-list-section__spec-label",
+
+  "rankings_selector": "table.react-table",
+  "rankings_rows": 15,
+  "min_rankings_rows": 8,
+
+  "ad_selectors": [
+    "[class*=\"AdPlacement\"]",
+    "[class*=\"stickyFooterAd\"]",
+    "[class*=\"PlaywireAd\"]",
+    "[class*=\"Advertisements_\"]",
+    "[class*=\"containerSidebar\"]",
+    "iframe[src*=\"ads\"]",
+    "iframe[src*=\"doubleclick\"]"
+  ],
 
   "viewport_width": 1050,
   "viewport_height": 1200,
@@ -22,6 +36,7 @@
 
   "nav_timeout_ms": 60000,
   "data_timeout_ms": 45000,
+  "ad_wait_ms": 8000,
   "request_timeout": 60,
   "embed_color": 10038562
 }

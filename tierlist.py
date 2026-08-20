@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Еженедельный скриншот тир-листа Mythic+ с archon.gg в Discord.
+"""Ежедневный скриншот тир-листа Mythic+ и таблицы рейтингов с archon.gg в Discord.
 
 Вебхук читается ТОЛЬКО из переменной окружения TIERLIST_WEBHOOK.
 
-Логика публикации: одно сообщение, которое обновляется каждую неделю.
-ID лежит в tierlist_state.json. Если сообщение удалили руками — создаём новое.
+Логика публикации: одно сообщение с двумя картинками, которое обновляется
+каждый день. ID лежит в tierlist_state.json. Если сообщение удалили руками —
+создаём новое.
 
 Скриншоты хрупкие, поэтому любая неуверенность в результате — это красный
 прогон с внятной ошибкой, а не пустая картинка в канале.
@@ -29,6 +30,7 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "tierlist_config.json"
 STATE_PATH = ROOT / "tierlist_state.json"
 SHOT_PATH = ROOT / "tierlist.png"
+RANK_PATH = ROOT / "rankings.png"
 
 DEFAULTS = {
     "url": "https://www.archon.gg/wow/tier-list/dps-rankings/mythic-plus/10/all-dungeons/this-week",
@@ -38,11 +40,27 @@ DEFAULTS = {
     "tier_selector": ".builds-tier-list-section__tier-heading",
     "spec_selector": ".builds-tier-list-section__spec-contents",
     "label_selector": ".builds-tier-list-section__spec-label",
+    # Вторая картинка — таблица рейтингов под тир-листом.
+    "rankings_selector": "table.react-table",
+    "rankings_rows": 15,
+    "min_rankings_rows": 8,
+    # Рекламные слои. Классы у Archon хэшированные (Advertisements_x__a1b2),
+    # поэтому цепляемся за устойчивый префикс через [class*=...].
+    "ad_selectors": [
+        '[class*="AdPlacement"]',
+        '[class*="stickyFooterAd"]',
+        '[class*="PlaywireAd"]',
+        '[class*="Advertisements_"]',
+        '[class*="containerSidebar"]',
+        'iframe[src*="ads"]',
+        'iframe[src*="doubleclick"]',
+    ],
     "viewport_width": 1050,
     "viewport_height": 1200,
     "device_scale_factor": 2,
     "nav_timeout_ms": 60000,
     "data_timeout_ms": 45000,
+    "ad_wait_ms": 8000,
     # Пороги «данные действительно отрисовались»
     "min_tiers": 3,
     "min_specs": 15,
@@ -52,7 +70,7 @@ DEFAULTS = {
     "min_bytes": 20000,
     "min_unique_colors": 60,
     "min_stddev": 12.0,
-    "caption_title": "Тир-лист Mythic+ · +10 · все подземелья · за неделю",
+    "caption_title": "Тир-лист Mythic+ · ключи +7 и выше · все подземелья · за 14 дней",
     "source_name": "Archon.gg",
     "embed_color": 10038562,
     "request_timeout": 60,
@@ -104,11 +122,83 @@ cfg => {
 }
 """
 
+# Сначала пробуем закрыть рекламу штатным крестиком — так же, как это сделал бы
+# человек. Что не закрылось, добиваем стилями (CSS_CLEANUP) и потом проверяем,
+# что на кадре ничего не осталось поверх (JS_OVERLAP).
+JS_CLOSE_ADS = """
+() => {
+    const rx = /^(close ad|close|закрыть|×|✕|✖|x)$/i;
+    let clicked = 0;
+    document.querySelectorAll('button, a, [role="button"], [class*="close" i]').forEach(el => {
+        const label = (el.innerText || el.getAttribute('aria-label')
+                    || el.getAttribute('title') || '').trim();
+        if (!rx.test(label)) return;
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) return;
+        try { el.click(); clicked++; } catch (e) { /* не кликнулось — переживём */ }
+    });
+    return clicked;
+}
+"""
+
+# Сайт держит в DOM все строки, но показывает только первые семь —
+# остальные раскрывает кнопка «Show More». Жмём её штатно, а не боремся с CSS.
+JS_EXPAND_ROWS = """
+cfg => {
+    const table = document.querySelector(cfg.table);
+    if (!table) return false;
+    const scope = table.closest('section') || document;
+    const btn = [...scope.querySelectorAll('button, a')].find(
+        e => /show more|показать ещё/i.test((e.innerText || '').trim()));
+    if (!btn) return false;
+    btn.click();
+    return true;
+}
+"""
+
+# Оставляем в кадре только первые N строк.
+JS_LIMIT_ROWS = """
+cfg => {
+    const table = document.querySelector(cfg.table);
+    if (!table || !table.tBodies.length) return 0;
+    const rows = [...table.tBodies[0].rows];
+    rows.forEach((tr, i) => { tr.style.display = i < cfg.limit ? 'table-row' : 'none'; });
+    return rows.filter(tr => getComputedStyle(tr).display !== 'none').length;
+}
+"""
+
+# Не закрывает ли что-нибудь рекламное итоговый кадр.
+JS_OVERLAP = """
+cfg => {
+    const anchor = document.querySelector(cfg.anchor);
+    if (!anchor) return [{cls: 'секция не найдена', w: 0, h: 0}];
+    const sec = anchor.closest('section') || anchor;
+    const r = sec.getBoundingClientRect();
+    const bad = [];
+    document.querySelectorAll(cfg.ads.join(',')).forEach(el => {
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return;
+        const b = el.getBoundingClientRect();
+        if (b.width < 2 || b.height < 2) return;
+        const overlaps = !(b.right <= r.left || b.left >= r.right
+                        || b.bottom <= r.top || b.top >= r.bottom);
+        if (overlaps) bad.push({cls: (el.className || el.tagName).toString().slice(0, 60),
+                                w: Math.round(b.width), h: Math.round(b.height)});
+    });
+    return bad;
+}
+"""
+
 CSS_CLEANUP = """
   /* Реклама и длинные пояснения в кадр не нужны */
   [class*="AdPlacement"], [class*="stickyFooterAd"], [class*="PlaywireAd"],
+  [class*="Advertisements_"], [class*="containerSidebar"],
   .builds-tier-list-section__metric-description,
   .hide-on-compact { display: none !important; }
+
+  /* Таблица обрезана до первых строк — кнопка «Show More» вводила бы в заблуждение */
+  .react-table__wrapper ~ * button.react-button--style-gradient-rounded,
+  section button.react-button--style-gradient-rounded { display: none !important; }
 
   /* Названия специализаций подставлены вместо "Score" — дать им место */
   .builds-tier-list-section__spec-label {
@@ -172,8 +262,20 @@ def save_state(state):
     tmp.replace(STATE_PATH)
 
 
-def take_screenshot(cfg, out_path):
-    """Снимает секцию тир-листа. Кидает TierListError, если данных нет."""
+def _assert_not_covered(page, cfg, anchor, name):
+    """Убеждается, что поверх будущего кадра не осталось рекламы."""
+    bad = page.evaluate(JS_OVERLAP, {"anchor": anchor, "ads": cfg["ad_selectors"]})
+    if bad:
+        what = ", ".join("%s (%sx%s)" % (b["cls"], b["w"], b["h"]) for b in bad[:4])
+        raise TierListError(
+            "на кадре «%s» поверх содержимого осталась реклама: %s. "
+            "Крестик её не убрал и CSS тоже — дополните ad_selectors в tierlist_config.json"
+            % (name, what)
+        )
+
+
+def take_screenshots(cfg, tier_path, rank_path):
+    """Снимает тир-лист и таблицу рейтингов. Кидает TierListError, если данных нет."""
     sel = cfg["section_selector"]
     with sync_playwright() as pw:
         browser = pw.chromium.launch(args=["--disable-dev-shm-usage", "--no-sandbox"])
@@ -252,7 +354,28 @@ def take_screenshot(cfg, out_path):
                 "секция «%s»: тиров %s, специализаций %s", heading, counts["tiers"], counts["specs"]
             )
 
+            # Липкий баннер появляется позже данных, поэтому ждём именно крестик:
+            # раньше него закрывать нечего, а ждать всю рекламу бесполезно —
+            # боковые блоки есть на странице с самого начала.
+            try:
+                page.wait_for_function(
+                    """() => [...document.querySelectorAll('button, a, [role="button"]')].some(e => {
+                        const t = (e.innerText || e.getAttribute('aria-label') || '').trim();
+                        return /^(close ad|close|закрыть)$/i.test(t)
+                            && e.getBoundingClientRect().height > 0;
+                    })""",
+                    timeout=cfg["ad_wait_ms"],
+                )
+            except PlaywrightTimeout:
+                logging.info("крестик закрытия рекламы не появился — обойдусь стилями")
+
+            # Сначала штатный крестик, как сделал бы человек, остатки — стилями.
+            closed = page.evaluate(JS_CLOSE_ADS)
+            if closed:
+                page.wait_for_timeout(400)
+            logging.info("закрыто рекламных блоков крестиком: %s", closed)
             page.add_style_tag(content=CSS_CLEANUP)
+
             named = page.evaluate(
                 JS_INJECT_NAMES,
                 {"section": sel, "spec": cfg["spec_selector"], "label": cfg["label_selector"]},
@@ -266,11 +389,93 @@ def take_screenshot(cfg, out_path):
             else:
                 logging.info("подписал названиями все %s специализаций", named)
 
+            # Вторая картинка: таблица рейтингов. Тоже ждём данные, а не паузу.
+            rank_sel = cfg["rankings_selector"]
+            try:
+                page.wait_for_function(
+                    """cfg => {
+                        const t = document.querySelector(cfg.table);
+                        return !!t && t.tBodies.length > 0
+                            && t.tBodies[0].rows.length >= cfg.minRows;
+                    }""",
+                    arg={"table": rank_sel, "minRows": cfg["min_rankings_rows"]},
+                    timeout=cfg["data_timeout_ms"],
+                )
+            except PlaywrightTimeout as exc:
+                got = page.evaluate(
+                    """sel => {
+                        const t = document.querySelector(sel);
+                        return {found: !!t,
+                                rows: t && t.tBodies.length ? t.tBodies[0].rows.length : 0};
+                    }""",
+                    rank_sel,
+                )
+                raise TierListError(
+                    "таблица рейтингов не набралась за %s мс. Селектор «%s»: найдена=%s, "
+                    "строк=%s (нужно %s). Похоже, сайт изменил вёрстку — проверьте "
+                    "rankings_selector в tierlist_config.json"
+                    % (cfg["data_timeout_ms"], rank_sel, got["found"], got["rows"],
+                       cfg["min_rankings_rows"])
+                ) from exc
+
+            table_info = page.evaluate(
+                """sel => {
+                    const t = document.querySelector(sel);
+                    const s = t.closest('section');
+                    const h = s && s.querySelector('h1,h2,h3');
+                    return {heading: h ? h.innerText.trim() : null,
+                            columns: [...t.querySelectorAll('thead th')]
+                                       .map(e => e.innerText.replace(/\\s+/g, ' ').trim())
+                                       .filter(Boolean),
+                            total: t.tBodies[0].rows.length};
+                }""",
+                rank_sel,
+            )
+            expanded = page.evaluate(JS_EXPAND_ROWS, {"table": rank_sel})
+            if expanded:
+                page.wait_for_timeout(800)
+            else:
+                logging.warning(
+                    "кнопка «Show More» не найдена — в кадр попадут только строки, "
+                    "которые сайт показывает сразу"
+                )
+            shown = page.evaluate(
+                JS_LIMIT_ROWS, {"table": rank_sel, "limit": cfg["rankings_rows"]}
+            )
+            logging.info(
+                "секция «%s»: колонки %s, строк всего %s, показываю %s",
+                table_info["heading"], " | ".join(table_info["columns"]),
+                table_info["total"], shown,
+            )
+            if shown < cfg["min_rankings_rows"]:
+                raise TierListError(
+                    "в таблицу рейтингов попало всего %s строк (нужно минимум %s). "
+                    "Раскрыть список не удалось — проверьте, не переименовал ли сайт "
+                    "кнопку «Show More»" % (shown, cfg["min_rankings_rows"])
+                )
+
             page.wait_for_timeout(500)
-            target = page.locator(sel).first.locator("xpath=ancestor::section[1]")
-            target.screenshot(path=str(out_path))
-            logging.info("скриншот снят: %s", out_path.name)
-            return heading
+
+            for name, selector, path in (
+                ("тир-лист", sel, tier_path),
+                ("рейтинги", rank_sel, rank_path),
+            ):
+                target = page.locator(selector).first.locator("xpath=ancestor::section[1]")
+                # Сначала подводим кадр в вид: липкая реклама позиционируется
+                # относительно окна, и проверять перекрытие имеет смысл только тут.
+                target.scroll_into_view_if_needed()
+                page.wait_for_timeout(250)
+                _assert_not_covered(page, cfg, selector, name)
+                target.screenshot(path=str(path))
+                logging.info("скриншот «%s» снят: %s", name, path.name)
+
+            return {
+                "heading": heading,
+                "tiers": counts["tiers"],
+                "specs": counts["specs"],
+                "rank_heading": table_info["heading"],
+                "rank_rows": shown,
+            }
         finally:
             browser.close()
 
@@ -315,8 +520,10 @@ def validate_image(path, cfg):
     return width, height
 
 
-def build_embed(cfg):
-    return {
+def build_embeds(cfg):
+    """Два эмбеда с одинаковым url — Discord склеивает такие в одну карточку
+    с галереей картинок, поэтому обе уходят одним сообщением."""
+    first = {
         "title": cfg["caption_title"],
         "url": cfg["url"],
         "description": "Источник: [%s](%s)" % (cfg["source_name"], cfg["url"]),
@@ -324,18 +531,28 @@ def build_embed(cfg):
         "image": {"url": "attachment://tierlist.png"},
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    second = {
+        "url": cfg["url"],
+        "color": cfg["embed_color"],
+        "image": {"url": "attachment://rankings.png"},
+    }
+    return [first, second]
 
 
-def _multipart(cfg, image_bytes):
+def _multipart(cfg, images):
+    """images — список пар (имя файла, байты) в порядке эмбедов."""
     payload = {
-        "embeds": [build_embed(cfg)],
-        "attachments": [{"id": 0, "filename": "tierlist.png"}],
+        "embeds": build_embeds(cfg),
+        "attachments": [
+            {"id": i, "filename": name} for i, (name, _) in enumerate(images)
+        ],
         "allowed_mentions": {"parse": []},
     }
     files = {
         "payload_json": (None, json.dumps(payload, ensure_ascii=False), "application/json"),
-        "files[0]": ("tierlist.png", image_bytes, "image/png"),
     }
+    for i, (name, blob) in enumerate(images):
+        files["files[%d]" % i] = (name, blob, "image/png")
     return files
 
 
@@ -348,11 +565,11 @@ def _check_fatal(resp, what):
         )
 
 
-def post_new(webhook, cfg, image_bytes):
+def post_new(webhook, cfg, images):
     """Создаёт новое сообщение и возвращает его id."""
     resp = requests.post(
         webhook + "?wait=true",
-        files=_multipart(cfg, image_bytes),
+        files=_multipart(cfg, images),
         timeout=cfg["request_timeout"],
     )
     _check_fatal(resp, "создании сообщения")
@@ -371,11 +588,11 @@ def post_new(webhook, cfg, image_bytes):
     return message_id
 
 
-def edit_existing(webhook, cfg, image_bytes, message_id):
+def edit_existing(webhook, cfg, images, message_id):
     """Обновляет сообщение. Возвращает False, если его больше нет."""
     resp = requests.patch(
         "%s/messages/%s" % (webhook, message_id),
-        files=_multipart(cfg, image_bytes),
+        files=_multipart(cfg, images),
         timeout=cfg["request_timeout"],
     )
     _check_fatal(resp, "обновлении сообщения")
@@ -389,17 +606,17 @@ def edit_existing(webhook, cfg, image_bytes, message_id):
     return True
 
 
-def publish(webhook, cfg, image_bytes, state):
+def publish(webhook, cfg, images, state):
     message_id = state.get("message_id")
     if message_id:
         logging.info("обновляю существующее сообщение %s", message_id)
-        if edit_existing(webhook, cfg, image_bytes, message_id):
+        if edit_existing(webhook, cfg, images, message_id):
             state["action"] = "updated"
             return state
     else:
         logging.info("сохранённого сообщения нет — создаю новое")
 
-    new_id = post_new(webhook, cfg, image_bytes)
+    new_id = post_new(webhook, cfg, images)
     logging.info("создано сообщение %s", new_id)
     state["message_id"] = new_id
     state["action"] = "created"
@@ -414,16 +631,20 @@ def run():
         logging.error("нет переменной окружения TIERLIST_WEBHOOK — отправлять некуда")
         return 1
 
-    take_screenshot(cfg, SHOT_PATH)
-    validate_image(SHOT_PATH, cfg)
+    take_screenshots(cfg, SHOT_PATH, RANK_PATH)
+    for path in (SHOT_PATH, RANK_PATH):
+        validate_image(path, cfg)
 
     if dry_run:
         logging.info("DRY-RUN: в Discord ничего не отправляю")
         return 0
 
-    image_bytes = SHOT_PATH.read_bytes()
+    images = [
+        ("tierlist.png", SHOT_PATH.read_bytes()),
+        ("rankings.png", RANK_PATH.read_bytes()),
+    ]
     state = load_state()
-    state = publish(webhook, cfg, image_bytes, state)
+    state = publish(webhook, cfg, images, state)
     state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     state["source_url"] = cfg["url"]
     save_state(state)
