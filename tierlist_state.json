@@ -2,20 +2,20 @@
   "roles": {
     "dps": {
       "message_id": "1539754892468682912",
-      "updated_at": "2026-08-21T08:05:59Z",
+      "updated_at": "2026-08-22T07:46:48Z",
       "source_url": "https://www.archon.gg/wow/tier-list/dps-rankings/mythic-plus/10/all-dungeons/this-week",
       "action": "updated"
     },
     "tank": {
       "message_id": "1539803185353461952",
       "action": "updated",
-      "updated_at": "2026-08-21T08:06:06Z",
+      "updated_at": "2026-08-22T07:46:54Z",
       "source_url": "https://www.archon.gg/wow/tier-list/tank-rankings/mythic-plus/10/all-dungeons/this-week"
     },
     "healer": {
       "message_id": "1539803213740380212",
       "action": "updated",
-      "updated_at": "2026-08-21T08:06:12Z",
+      "updated_at": "2026-08-22T07:47:01Z",
       "source_url": "https://www.archon.gg/wow/tier-list/healer-rankings/mythic-plus/10/all-dungeons/this-week"
     }
   }
