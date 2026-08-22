@@ -47,49 +47,48 @@ jobs:
           MESSAGE_IDS: ${{ inputs.rebuild_message_id }}
         run: |
           python - <<'PY'
-          import json, os, time, requests
+          import os, time, requests
 
           hook = os.environ["TRANSMOG_WEBHOOK"].rstrip("/")
-          mid = os.environ["MESSAGE_ID"]
+          ids = [x.strip() for x in os.environ["MESSAGE_IDS"].split(",") if x.strip()]
 
-          def show(tag):
-              r = requests.get(f"{hook}/messages/{mid}", timeout=30)
-              data = r.json()
+          def show(tag, mid):
+              data = requests.get(f"{hook}/messages/{mid}", timeout=30).json()
               print(f"--- {tag} ---")
-              print("  content:", repr(data.get("content", ""))[:90])
               for e in data.get("embeds") or []:
-                  print("  type:       ", e.get("type"))
-                  print("  title:      ", (e.get("title") or "")[:70])
-                  print("  author:     ", (e.get("author") or {}).get("name"))
                   desc = e.get("description") or ""
-                  print("  description:", len(desc), "симв.", repr(desc[:60]))
+                  print("  title:      ", (e.get("title") or "")[:64])
+                  print("  author:     ", (e.get("author") or {}).get("name"))
+                  print("  description:", len(desc), "симв.")
                   for k in ("image", "thumbnail", "video"):
                       b = e.get(k)
                       if b:
-                          print(f"  {k}: {b.get('width')}x{b.get('height')} {str(b.get('url'))[:60]}")
+                          print(f"  {k}: {b.get('width')}x{b.get('height')}")
               return data
 
           for mid in ids:
-            before = show("ДО " + mid, mid)
-            src = (before.get("embeds") or [None])[0]
-            if not src:
-              print("  нет эмбеда — пропускаю"); continue
-
+              before = show("ДО " + mid, mid)
+              src = (before.get("embeds") or [None])[0]
+              if not src:
+                  print("  нет эмбеда — пропускаю")
+                  continue
               media = src.get("image") or src.get("thumbnail") or {}
-            if not media.get("url"):
-              print("  нет картинки — пропускаю"); continue
-            clean = {"title": (src.get("title") or "")[:256], "image": {"url": media["url"]}}
-            if src.get("url"):
-              clean["url"] = src["url"]
-            if (src.get("author") or {}).get("name"):
-              clean["author"] = {"name": src["author"]["name"][:256]}
-            # content очищаем: иначе Discord развернёт ссылку заново и вернёт описание
-            r = requests.patch(f"{hook}/messages/{mid}",
-                               json={"content": "", "embeds": [clean]}, timeout=30)
-            print("  PATCH:", r.status_code, r.text[:120] if r.status_code >= 300 else "")
-            time.sleep(3)
-            show("ПОСЛЕ " + mid, mid)
-            print()
+              if not media.get("url"):
+                  print("  нет картинки — пропускаю")
+                  continue
+              clean = {"title": (src.get("title") or "")[:256],
+                       "image": {"url": media["url"]}}
+              if src.get("url"):
+                  clean["url"] = src["url"]
+              if (src.get("author") or {}).get("name"):
+                  clean["author"] = {"name": src["author"]["name"][:256]}
+              # content очищаем: иначе Discord развернёт ссылку заново
+              r = requests.patch(f"{hook}/messages/{mid}",
+                                 json={"content": "", "embeds": [clean]}, timeout=30)
+              print("  PATCH:", r.status_code, r.text[:120] if r.status_code >= 300 else "")
+              time.sleep(3)
+              show("ПОСЛЕ " + mid, mid)
+              print()
           PY
 
       - name: Есть ли честный источник счётчиков
