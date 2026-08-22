@@ -72,12 +72,17 @@ DEFAULTS = {
     #               og:description, то есть текст поста (у некоторых постов
     #               это длинный список шмота). Разделить нельзя: Discord берёт
     #               и то и другое из одних метаданных зеркала.
-    #   "minimal" — карточку собирает бот: только название и изображение.
-    #               Текста нет, но и счётчиков нет — прочитать их неоткуда:
-    #               в RSS их нет, .json у Reddit отдаёт 403, а метаданные
-    #               зеркала выдаются только распознанным краулерам.
-    # Видео в любом режиме уходит голой ссылкой, иначе не будет плеера.
-    "card_mode": "auto",
+    #   "clean"   — то же самое, но потом бот перечитывает свою карточку
+    #               и заменяет её очищенной: название, автор со счётчиками
+    #               и картинка, без описания. Цифры берутся из карточки,
+    #               которую Discord уже показал, — сторонних источников
+    #               и маскировки не требуется.
+    #   "minimal" — карточку собирает бот из данных ленты: только название
+    #               и изображение. Ни текста, ни счётчиков.
+    # Видео в любом режиме остаётся автокарточкой, иначе не будет плеера.
+    "card_mode": "clean",
+    # Сколько раз перечитать сообщение, ожидая, пока Discord построит превью.
+    "embed_wait_tries": 4,
     "request_timeout": 30,
     "delay_between_posts": 1.0,
     # Discord подтягивает превью асинхронно, ему нужно дать время.
@@ -261,11 +266,70 @@ def pick_posts(parsed, posted, cfg):
     return chosen
 
 
+def clean_embed(src):
+    """Из автокарточки Discord делает очищенную: без описания.
+
+    Автора со счётчиками лайков и комментариев берём как есть — это те же
+    цифры, что Discord уже показал. Картинку переносим в image: у одиночных
+    постов Discord кладёт её в thumbnail, и она выглядит мелким квадратом.
+    """
+    media = src.get("image") or src.get("thumbnail") or {}
+    if not media.get("url"):
+        return None
+    embed = {"title": (src.get("title") or "")[:256], "image": {"url": media["url"]}}
+    if src.get("url"):
+        embed["url"] = src["url"]
+    author = (src.get("author") or {}).get("name")
+    if author:
+        embed["author"] = {"name": author[:256]}
+    if src.get("color"):
+        embed["color"] = src["color"]
+    return embed
+
+
+def polish(webhook, sent, cfg):
+    """Перечитывает отправленные сообщения и убирает из карточек описание."""
+    for post, message_id in sent:
+        if post["kind"] == "видео":
+            # Плеер живёт только в автокарточке — её не трогаем.
+            continue
+        embeds = None
+        for _ in range(int(cfg["embed_wait_tries"])):
+            embeds = read_embeds(webhook, message_id, cfg)
+            if embeds:
+                break
+            time.sleep(cfg["embed_check_delay"] / 2.0)
+        if not embeds:
+            logging.warning("у %s не появилось превью — оставляю как есть", message_id)
+            continue
+        embed = clean_embed(embeds[0])
+        if not embed:
+            logging.warning("в карточке %s нет картинки — оставляю как есть", message_id)
+            continue
+        had = len(embeds[0].get("description") or "")
+        try:
+            resp = requests.patch(
+                "%s/messages/%s" % (webhook, message_id),
+                # content очищаем: иначе Discord развернёт ссылку заново
+                # и вернёт описание обратно.
+                json={"content": "", "embeds": [embed]},
+                timeout=cfg["request_timeout"],
+            )
+        except requests.RequestException as exc:
+            logging.warning("не смог пересобрать %s: %s", message_id, exc)
+            continue
+        if 200 <= resp.status_code < 300:
+            logging.info("карточка %s очищена (убрано описание: %s симв.)", message_id, had)
+        else:
+            logging.warning("не смог пересобрать %s: %s %s", message_id,
+                            resp.status_code, resp.text[:120])
+
+
 def card_style(post, cfg):
     """Чем отправлять пост: (payload, как это назвать в логе)."""
     # Видео — всегда голой ссылкой: плеер строит только автоматическое
     # превью Discord, в собственный эмбед бота видео не вставляется.
-    if post["kind"] == "видео" or cfg["card_mode"] != "minimal":
+    if post["kind"] == "видео" or cfg["card_mode"] in ("auto", "clean"):
         return {"content": post["url"]}, "ссылка (автокарточка)"
     return (
         {
@@ -447,6 +511,10 @@ def run():
     posted.extend(p["id"] for p in posts)
     save_posted(posted, cfg["history_size"])
     logging.info("в истории теперь %s постов", len(posted[-cfg["history_size"]:]))
+
+    if cfg["card_mode"] == "clean":
+        time.sleep(cfg["embed_check_delay"])
+        polish(webhook, sent, cfg)
 
     if cfg["verify_embeds"]:
         complaints = verify(webhook, sent, cfg)

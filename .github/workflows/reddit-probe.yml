@@ -44,7 +44,7 @@ jobs:
         if: ${{ inputs.rebuild_message_id != '' }}
         env:
           TRANSMOG_WEBHOOK: ${{ secrets.TRANSMOG_WEBHOOK }}
-          MESSAGE_ID: ${{ inputs.rebuild_message_id }}
+          MESSAGE_IDS: ${{ inputs.rebuild_message_id }}
         run: |
           python - <<'PY'
           import json, os, time, requests
@@ -69,28 +69,27 @@ jobs:
                           print(f"  {k}: {b.get('width')}x{b.get('height')} {str(b.get('url'))[:60]}")
               return data
 
-          before = show("ДО")
-          src = (before.get("embeds") or [None])[0]
-          if not src:
-              raise SystemExit("у сообщения нет эмбеда — нечего пересобирать")
+          for mid in ids:
+            before = show("ДО " + mid, mid)
+            src = (before.get("embeds") or [None])[0]
+            if not src:
+              print("  нет эмбеда — пропускаю"); continue
 
-          media = src.get("image") or src.get("thumbnail") or {}
-          clean = {"title": (src.get("title") or "")[:256]}
-          if src.get("url"):
+              media = src.get("image") or src.get("thumbnail") or {}
+            if not media.get("url"):
+              print("  нет картинки — пропускаю"); continue
+            clean = {"title": (src.get("title") or "")[:256], "image": {"url": media["url"]}}
+            if src.get("url"):
               clean["url"] = src["url"]
-          if (src.get("author") or {}).get("name"):
+            if (src.get("author") or {}).get("name"):
               clean["author"] = {"name": src["author"]["name"][:256]}
-          if media.get("url"):
-              clean["image"] = {"url": media["url"]}
-
-          print()
-          print("PATCH:", json.dumps(clean, ensure_ascii=False)[:300])
-          # content очищаем: иначе Discord развернёт ссылку заново и вернёт описание
-          r = requests.patch(f"{hook}/messages/{mid}",
-                             json={"content": "", "embeds": [clean]}, timeout=30)
-          print("  статус:", r.status_code, r.text[:160] if r.status_code >= 300 else "")
-          time.sleep(4)
-          show("ПОСЛЕ")
+            # content очищаем: иначе Discord развернёт ссылку заново и вернёт описание
+            r = requests.patch(f"{hook}/messages/{mid}",
+                               json={"content": "", "embeds": [clean]}, timeout=30)
+            print("  PATCH:", r.status_code, r.text[:120] if r.status_code >= 300 else "")
+            time.sleep(3)
+            show("ПОСЛЕ " + mid, mid)
+            print()
           PY
 
       - name: Есть ли честный источник счётчиков
