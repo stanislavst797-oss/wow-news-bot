@@ -83,6 +83,8 @@ DEFAULTS = {
     "card_mode": "clean",
     # Сколько раз перечитать сообщение, ожидая, пока Discord построит превью.
     "embed_wait_tries": 4,
+    # Пауза между пересборками карточек, чтобы не ловить 429 от Discord.
+    "polish_pause": 0.7,
     "request_timeout": 30,
     "delay_between_posts": 1.0,
     # Discord подтягивает превью асинхронно, ему нужно дать время.
@@ -307,22 +309,50 @@ def polish(webhook, sent, cfg):
             logging.warning("в карточке %s нет картинки — оставляю как есть", message_id)
             continue
         had = len(embeds[0].get("description") or "")
-        try:
-            resp = requests.patch(
-                "%s/messages/%s" % (webhook, message_id),
-                # content очищаем: иначе Discord развернёт ссылку заново
-                # и вернёт описание обратно.
-                json={"content": "", "embeds": [embed]},
-                timeout=cfg["request_timeout"],
-            )
-        except requests.RequestException as exc:
-            logging.warning("не смог пересобрать %s: %s", message_id, exc)
-            continue
-        if 200 <= resp.status_code < 300:
-            logging.info("карточка %s очищена (убрано описание: %s симв.)", message_id, had)
-        else:
+        done = False
+        for attempt in range(1, 4):
+            try:
+                resp = requests.patch(
+                    "%s/messages/%s" % (webhook, message_id),
+                    # content очищаем: иначе Discord развернёт ссылку заново
+                    # и вернёт описание обратно.
+                    json={"content": "", "embeds": [embed]},
+                    timeout=cfg["request_timeout"],
+                )
+            except requests.RequestException as exc:
+                logging.warning("сеть при пересборке %s (попытка %s): %s",
+                                message_id, attempt, exc)
+                time.sleep(2 * attempt)
+                continue
+
+            # Пять правок подряд легко упираются в лимит Discord.
+            # Без этой ветки карточка молча оставалась с описанием.
+            if resp.status_code == 429:
+                try:
+                    wait = float(resp.json().get("retry_after", 1))
+                except (ValueError, TypeError, AttributeError):
+                    wait = 1.0
+                if wait > 300:
+                    wait /= 1000.0
+                wait = min(wait, 60) + 0.5
+                logging.info("429 при пересборке %s, жду %.1f с", message_id, wait)
+                time.sleep(wait)
+                continue
+
+            if 200 <= resp.status_code < 300:
+                logging.info("карточка %s очищена (убрано описание: %s симв.)",
+                             message_id, had)
+                done = True
+                break
+
             logging.warning("не смог пересобрать %s: %s %s", message_id,
                             resp.status_code, resp.text[:120])
+            break
+
+        if not done:
+            logging.warning("карточка %s осталась с описанием", message_id)
+        # Небольшая пауза, чтобы не упираться в лимит на следующей правке.
+        time.sleep(cfg["polish_pause"])
 
 
 def card_style(post, cfg):
