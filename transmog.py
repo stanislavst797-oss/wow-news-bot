@@ -10,11 +10,12 @@
 незачем. Маркдаун в ссылке недопустим: на замаскированную ссылку
 превью не строится.
 
-Домен в ссылке выбирается по типу поста, и это проверено замерами на одном
-и том же посте: видео через зеркало vxreddit даёт в карточке настоящий плеер
-(type=video, mp4), а через reddit.com — только статичный кадр; зато картинки
-и галереи через reddit.com дают широкую карточку 1120x584, а через зеркало
-съёживаются в мелкий thumbnail. Оба домена вынесены в конфиг.
+Домен подменяется на зеркало (link_host в конфиге). Это важно не только
+ради видео: по прямой ссылке на reddit.com Discord берёт сгенерированный
+баннер share.redd.it, где работа втиснута в полосу по центру, а вокруг
+впечатаны логотип, название сабреддита и счётчики голосов. Зеркало же
+отдаёт ссылку на исходный файл — картинка чистая, гифка анимируется,
+видео разворачивается плеером.
 
 К зеркалу ходит сам Discord — бот его не дёргает, так что единственный
 сетевой запрос бота за прогон это RSS Reddit.
@@ -43,15 +44,17 @@ DEFAULTS = {
     "user_agent": "discord-transmog-bot/1.0",
     "count": 5,
     "history_size": 500,
-    # Домены проверены на одном и том же посте:
-    #   vxreddit  — у видео даёт type=video и плеер, но у обычной картинки
-    #               только thumbnail 800x800, то есть узкую карточку;
-    #   reddit.com — у картинок и галерей даёт image 1120x584 (широкая карточка),
-    #               но у видео только статичный кадр.
-    # Поэтому видео идёт через зеркало, остальное — напрямую.
+    # Зеркало для всех типов постов. Оно отдаёт Discord ссылку на исходный
+    # файл с i.redd.it — то есть саму работу автора: картинка чистая,
+    # гифка анимируется, видео разворачивается плеером.
+    #
+    # Прямые ссылки на reddit.com сюда не годятся: Discord берёт у них
+    # share.redd.it/preview/post/<id> — сгенерированный баннер 1120x584,
+    # где работа втиснута в полосу по центру, а вокруг впечатаны название
+    # сабреддита, логотип, счётчики голосов и кнопка плея поверх видео.
+    #
     # Ляжет vxreddit — поставьте сюда rxddit.com, код трогать не нужно.
-    "link_host_video": "vxreddit.com",
-    "link_host": "www.reddit.com",
+    "link_host": "vxreddit.com",
     "header": "Трансмоги дня",
     "request_timeout": 30,
     "delay_between_posts": 1.0,
@@ -179,11 +182,6 @@ def detect_kind(entry):
     return "картинка"
 
 
-def host_for(kind, cfg):
-    """Видео — через зеркало с плеером, остальное — напрямую с reddit.com."""
-    return cfg["link_host_video"] if kind == "видео" else cfg["link_host"]
-
-
 def mirror_link(link, host):
     """Тот же путь, только домен другой."""
     parts = urlparse(link)
@@ -206,7 +204,7 @@ def pick_posts(parsed, posted, cfg):
                 "id": post_id,
                 "title": (entry.get("title") or "без заголовка").strip(),
                 "kind": kind,
-                "url": mirror_link(link, host_for(kind, cfg)),
+                "url": mirror_link(link, cfg["link_host"]),
             }
         )
     return chosen
@@ -277,8 +275,12 @@ def describe_embed(embed):
     for key in ("video", "image", "thumbnail"):
         block = embed.get(key)
         if block:
+            # Хост важнее размеров: i.redd.it — это сама работа автора,
+            # а share.redd.it — сгенерированный баннер с впечатанными
+            # логотипом, названием сабреддита и счётчиками голосов.
+            host = urlparse(block.get("url") or "").netloc or "?"
             parts.append(
-                "%s=%sx%s" % (key, block.get("width"), block.get("height"))
+                "%s=%sx%s@%s" % (key, block.get("width"), block.get("height"), host)
             )
     return ", ".join(parts)
 
@@ -328,15 +330,9 @@ def run():
         logging.info("первый запуск: истории нет, беру сегодняшний топ-%s", cfg["count"])
 
     posts = pick_posts(parsed, posted, cfg)
-    logging.info(
-        "постов к отправке: %s (видео через %s, остальное через %s)",
-        len(posts), cfg["link_host_video"], cfg["link_host"],
-    )
+    logging.info("постов к отправке: %s (через %s)", len(posts), cfg["link_host"])
     for post in posts:
-        logging.info(
-            "  %s  [%-8s]  %-46s  %s",
-            post["id"], post["kind"], post["title"][:46], urlparse(post["url"]).netloc,
-        )
+        logging.info("  %s  [%-8s]  %s", post["id"], post["kind"], post["title"][:50])
 
     if not posts:
         logging.info("всё из сегодняшнего топа уже отправляли — сообщений не будет")
