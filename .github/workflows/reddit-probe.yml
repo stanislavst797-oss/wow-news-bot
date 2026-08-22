@@ -22,6 +22,10 @@ on:
         description: 'true — проверить, отдаёт ли Reddit счётчики лайков и комментариев'
         required: false
         default: ''
+      rebuild_message_id:
+        description: 'ID сообщения — пересобрать его карточку без описания, сохранив счётчики'
+        required: false
+        default: ''
 
 jobs:
   probe:
@@ -35,6 +39,59 @@ jobs:
 
       - name: Install deps
         run: python -m pip install --quiet 'requests~=2.34'
+
+      - name: Пересобрать карточку без описания
+        if: ${{ inputs.rebuild_message_id != '' }}
+        env:
+          TRANSMOG_WEBHOOK: ${{ secrets.TRANSMOG_WEBHOOK }}
+          MESSAGE_ID: ${{ inputs.rebuild_message_id }}
+        run: |
+          python - <<'PY'
+          import json, os, time, requests
+
+          hook = os.environ["TRANSMOG_WEBHOOK"].rstrip("/")
+          mid = os.environ["MESSAGE_ID"]
+
+          def show(tag):
+              r = requests.get(f"{hook}/messages/{mid}", timeout=30)
+              data = r.json()
+              print(f"--- {tag} ---")
+              print("  content:", repr(data.get("content", ""))[:90])
+              for e in data.get("embeds") or []:
+                  print("  type:       ", e.get("type"))
+                  print("  title:      ", (e.get("title") or "")[:70])
+                  print("  author:     ", (e.get("author") or {}).get("name"))
+                  desc = e.get("description") or ""
+                  print("  description:", len(desc), "симв.", repr(desc[:60]))
+                  for k in ("image", "thumbnail", "video"):
+                      b = e.get(k)
+                      if b:
+                          print(f"  {k}: {b.get('width')}x{b.get('height')} {str(b.get('url'))[:60]}")
+              return data
+
+          before = show("ДО")
+          src = (before.get("embeds") or [None])[0]
+          if not src:
+              raise SystemExit("у сообщения нет эмбеда — нечего пересобирать")
+
+          media = src.get("image") or src.get("thumbnail") or {}
+          clean = {"title": (src.get("title") or "")[:256]}
+          if src.get("url"):
+              clean["url"] = src["url"]
+          if (src.get("author") or {}).get("name"):
+              clean["author"] = {"name": src["author"]["name"][:256]}
+          if media.get("url"):
+              clean["image"] = {"url": media["url"]}
+
+          print()
+          print("PATCH:", json.dumps(clean, ensure_ascii=False)[:300])
+          # content очищаем: иначе Discord развернёт ссылку заново и вернёт описание
+          r = requests.patch(f"{hook}/messages/{mid}",
+                             json={"content": "", "embeds": [clean]}, timeout=30)
+          print("  статус:", r.status_code, r.text[:160] if r.status_code >= 300 else "")
+          time.sleep(4)
+          show("ПОСЛЕ")
+          PY
 
       - name: Есть ли честный источник счётчиков
         if: ${{ inputs.counts_test != '' }}
@@ -74,7 +131,7 @@ jobs:
           PY
 
       - name: Запрос к Reddit
-        if: ${{ inputs.send_url == '' && inputs.message_id == '' && inputs.counts_test == '' }}
+        if: ${{ inputs.send_url == '' && inputs.message_id == '' && inputs.counts_test == '' && inputs.rebuild_message_id == '' }}
         run: |
           python - <<'PY'
           import requests
