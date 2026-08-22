@@ -1,24 +1,28 @@
 name: Reddit probe (диагностика)
 
-# Разовая проверка: пускает ли Reddit раннеры GitHub (Azure) к RSS.
-# Локальная проверка тут ничего не значит — нужен именно этот IP.
-# Если бот трансмогов начнёт краснеть с «Reddit ответил 403» — запустите это
-# и посмотрите, что именно приходит.
+# Три режима, все запускаются вручную:
+#   без параметров      — пускает ли Reddit раннеры GitHub (Azure) к RSS
+#   send_url=<ссылка>   — отправить ссылку в канал трансмогов и разобрать её превью
+#   message_id=<id>     — разобрать превью уже отправленного сообщения
 #
-# Дополнительно: если указать message_id, покажет, какие превью Discord
-# построил для этого сообщения (тип, есть ли видео/картинка).
+# Локальная проверка тут ничего не значит: и Reddit, и Discord видят именно
+# этот IP, а метаданные для карточки Discord тянет со своих серверов.
 on:
   workflow_dispatch:
     inputs:
+      send_url:
+        description: 'Ссылка — отправить в канал трансмогов и показать её превью'
+        required: false
+        default: ''
       message_id:
-        description: 'ID сообщения в канале трансмогов — покажет его превью'
+        description: 'ID уже отправленного сообщения — показать его превью'
         required: false
         default: ''
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     steps:
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -29,7 +33,7 @@ jobs:
         run: python -m pip install --quiet 'requests~=2.34'
 
       - name: Запрос к Reddit
-        if: ${{ inputs.message_id == '' }}
+        if: ${{ inputs.send_url == '' && inputs.message_id == '' }}
         run: |
           python - <<'PY'
           import requests
@@ -51,6 +55,40 @@ jobs:
                   print("  МАРКЕР:", marker)
           PY
 
+      - name: Отправить ссылку и разобрать её превью
+        if: ${{ inputs.send_url != '' }}
+        env:
+          TRANSMOG_WEBHOOK: ${{ secrets.TRANSMOG_WEBHOOK }}
+          SEND_URL: ${{ inputs.send_url }}
+        run: |
+          python - <<'PY'
+          import json, os, time, requests
+
+          hook = os.environ["TRANSMOG_WEBHOOK"].rstrip("/")
+          url = os.environ["SEND_URL"]
+          print("отправляю голой ссылкой:", url)
+          r = requests.post(hook + "?wait=true",
+                            json={"content": url, "allowed_mentions": {"parse": []}},
+                            timeout=30)
+          print("  POST статус:", r.status_code)
+          r.raise_for_status()
+          mid = r.json()["id"]
+          print("  id сообщения:", mid)
+
+          # Discord подтягивает превью асинхронно — даём ему время.
+          for wait in (5, 5, 5):
+              time.sleep(wait)
+              g = requests.get(f"{hook}/messages/{mid}", timeout=30)
+              embeds = g.json().get("embeds") or []
+              if embeds:
+                  break
+          print("  превью:", len(embeds))
+          print(json.dumps(embeds, ensure_ascii=False, indent=1)[:3000])
+          has_video = any(e.get("video") for e in embeds)
+          print()
+          print("ВИДЕОБЛОК В ЭМБЕДЕ:", "ЕСТЬ" if has_video else "НЕТ")
+          PY
+
       - name: Разбор превью сообщения
         if: ${{ inputs.message_id != '' }}
         env:
@@ -58,24 +96,25 @@ jobs:
           MESSAGE_ID: ${{ inputs.message_id }}
         run: |
           python - <<'PY'
-          import json, os, requests
+          import os, requests
 
           hook = os.environ["TRANSMOG_WEBHOOK"].rstrip("/")
           mid = os.environ["MESSAGE_ID"]
           r = requests.get(f"{hook}/messages/{mid}", timeout=30)
           print("статус:", r.status_code)
           data = r.json()
+          print("тело сообщения:", repr(data.get("content", ""))[:200])
           embeds = data.get("embeds") or []
           print("превью всего:", len(embeds))
           for i, e in enumerate(embeds, 1):
               print(f"--- превью {i} ---")
               print("  type:      ", e.get("type"))
               print("  provider:  ", (e.get("provider") or {}).get("name"))
+              print("  author:    ", (e.get("author") or {}).get("name"))
               print("  title:     ", (e.get("title") or "")[:70])
-              print("  url:       ", (e.get("url") or "")[:90])
-              for key in ("image", "thumbnail", "video"):
+              for key in ("video", "image", "thumbnail"):
                   block = e.get(key)
                   if block:
-                      print(f"  {key}: url={str(block.get('url'))[:80]} "
-                            f"{block.get('width')}x{block.get('height')}")
+                      print(f"  {key}: {block.get('width')}x{block.get('height')} "
+                            f"{str(block.get('url'))[:70]}")
           PY

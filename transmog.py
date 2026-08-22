@@ -4,12 +4,17 @@
 
 Вебхук читается ТОЛЬКО из переменной окружения TRANSMOG_WEBHOOK.
 
-Каждый день — НОВОЕ сообщение, а не редактирование: в канале должна
-получаться лента, которую можно листать по дням.
+Формат намеренно минимальный: короткая шапка, дальше каждый пост —
+отдельным сообщением, в теле только голая ссылка. Название, сабреддит,
+автора и голоса Discord рисует сам в карточке, дублировать их текстом
+незачем. Маркдаун в ссылке недопустим: на замаскированную ссылку
+превью не строится.
 
-Медиа не скачиваем и не перезаливаем: в сообщение идёт голая ссылка на пост,
-а превью разворачивает сам Discord. Поэтому ссылки нельзя оформлять
-маркдауном [текст](url) — на замаскированные ссылки превью не строится.
+Домен подменяется на зеркало (link_host в конфиге): у обычного reddit.com
+видеопост разворачивается статичным кадром, а зеркало отдаёт og:video,
+и в карточке появляется настоящий плеер. К зеркалу ходит сам Discord —
+бот его не дёргает, так что единственный сетевой запрос бота за прогон
+это RSS Reddit.
 
 Про Reddit: один запрос в сутки, честный User-Agent, при 429 не долбим,
 а спокойно выходим и пробуем завтра.
@@ -21,6 +26,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import feedparser
 import requests
@@ -34,15 +40,14 @@ DEFAULTS = {
     "user_agent": "discord-transmog-bot/1.0",
     "count": 5,
     "history_size": 500,
-    "header": "**Трансмоги дня · r/Transmogrification**",
-    # single — все ссылки одним сообщением, separate — шапка и посты по одному.
-    # Discord строит превью не более чем на 5 ссылок в сообщении, так что
-    # при count > 5 разумно переключиться на separate.
-    "message_mode": "single",
+    # Зеркало, которое отдаёт Discord метаданные с видео.
+    # Ляжет vxreddit — поменяйте на rxddit.com прямо здесь, код не трогая.
+    "link_host": "vxreddit.com",
+    "header": "Трансмоги дня",
     "request_timeout": 30,
     "delay_between_posts": 1.0,
-    # Сколько ждать, пока Discord подтянет превью, прежде чем их пересчитать.
-    "embed_check_delay": 4.0,
+    # Discord подтягивает превью асинхронно, ему нужно дать время.
+    "embed_check_delay": 6.0,
     "verify_embeds": True,
 }
 
@@ -145,55 +150,51 @@ def fetch_feed(cfg):
     return parsed
 
 
+def entry_html(entry):
+    if entry.get("content"):
+        return entry["content"][0].get("value", "") or ""
+    return entry.get("summary", "") or ""
+
+
+def detect_kind(entry):
+    """Видео, галерея или картинка — по ссылке на медиа внутри записи.
+
+    Нужно только для лога и для проверки эмбедов: у видеопоста мы ждём
+    в карточке блок video, у остальных — картинку.
+    """
+    html = entry_html(entry)
+    if "v.redd.it" in html:
+        return "видео"
+    if "/gallery/" in html:
+        return "галерея"
+    return "картинка"
+
+
+def mirror_link(link, host):
+    """Тот же путь, только домен другой."""
+    parts = urlparse(link)
+    return urlunparse(parts._replace(netloc=host))
+
+
 def pick_posts(parsed, posted, cfg):
     known = set(posted)
-    fresh = []
+    chosen = []
     for entry in parsed.entries:
+        if len(chosen) >= cfg["count"]:
+            break
         post_id = entry.get("id")
         link = entry.get("link")
-        if not post_id or not link:
+        if not post_id or not link or post_id in known:
             continue
-        if post_id in known:
-            continue
-        fresh.append(
+        chosen.append(
             {
                 "id": post_id,
-                "link": link,
                 "title": (entry.get("title") or "без заголовка").strip(),
-                "author": (entry.get("author") or "").strip(),
+                "kind": detect_kind(entry),
+                "url": mirror_link(link, cfg["link_host"]),
             }
         )
-        if len(fresh) >= cfg["count"]:
-            break
-    return fresh
-
-
-def escape_md(text):
-    """Гасим маркдаун в тексте от пользователей.
-
-    Без этого заголовок вида «...seen some sh**» съезжает: его звёздочки
-    закрывают наш жирный шрифт раньше времени. Ссылку экранировать нельзя —
-    она должна остаться голой, иначе Discord не построит превью.
-    """
-    for ch in ("\\", "*", "_", "~", "`", "|"):
-        text = text.replace(ch, "\\" + ch)
-    return text
-
-
-def format_post(index, post):
-    author = (" — %s" % escape_md(post["author"])) if post["author"] else ""
-    # Ссылка обязательно голая, отдельной строкой: только так Discord строит превью.
-    return "**%d. %s**%s\n%s" % (index, escape_md(post["title"]), author, post["link"])
-
-
-def build_messages(posts, cfg):
-    """Список текстов сообщений: одно общее или шапка плюс по одному на пост."""
-    if cfg["message_mode"] == "separate":
-        chunks = [cfg["header"]]
-        chunks += [format_post(i, p) for i, p in enumerate(posts, 1)]
-        return chunks
-    body = "\n\n".join(format_post(i, p) for i, p in enumerate(posts, 1))
-    return ["%s\n\n%s" % (cfg["header"], body)]
+    return chosen
 
 
 def _check_fatal(resp, what):
@@ -235,33 +236,60 @@ def send_message(webhook, content, cfg):
             time.sleep(2 * attempt)
             continue
 
-        raise TransmogError(
-            "Discord отказал: %s %s" % (resp.status_code, resp.text[:300])
-        )
+        raise TransmogError("Discord отказал: %s %s" % (resp.status_code, resp.text[:300]))
 
     raise TransmogError("не удалось отправить сообщение после трёх попыток")
 
 
-def count_embeds(webhook, message_id, cfg):
-    """Сколько превью Discord успел построить. Диагностика, не приговор."""
+def read_embeds(webhook, message_id, cfg):
+    """Что Discord реально построил. Список эмбедов или None, если не прочиталось."""
     try:
         resp = requests.get(
             "%s/messages/%s" % (webhook, message_id), timeout=cfg["request_timeout"]
         )
         if not (200 <= resp.status_code < 300):
             return None
-        embeds = resp.json().get("embeds") or []
-        kinds = {}
-        for emb in embeds:
-            kind = emb.get("type", "?")
-            if emb.get("video"):
-                kind += "+видео"
-            elif emb.get("image") or emb.get("thumbnail"):
-                kind += "+картинка"
-            kinds[kind] = kinds.get(kind, 0) + 1
-        return len(embeds), kinds
+        return resp.json().get("embeds") or []
     except (requests.RequestException, ValueError):
         return None
+
+
+def describe_embed(embed):
+    parts = ["type=%s" % embed.get("type")]
+    provider = (embed.get("provider") or {}).get("name")
+    if provider:
+        parts.append("provider=%s" % provider)
+    for key in ("video", "image", "thumbnail"):
+        block = embed.get(key)
+        if block:
+            parts.append(
+                "%s=%sx%s" % (key, block.get("width"), block.get("height"))
+            )
+    return ", ".join(parts)
+
+
+def verify(webhook, sent, cfg):
+    """Разбирает эмбеды отправленных сообщений. Возвращает список замечаний."""
+    time.sleep(cfg["embed_check_delay"])
+    complaints = []
+    for post, message_id in sent:
+        embeds = read_embeds(webhook, message_id, cfg)
+        if embeds is None:
+            logging.warning("не смог перечитать сообщение %s", message_id)
+            continue
+        if not embeds:
+            logging.warning("[%s] %s — превью не построилось вовсе", post["kind"], message_id)
+            complaints.append((post, "превью нет"))
+            continue
+        for embed in embeds:
+            logging.info("[%s] %s: %s", post["kind"], message_id, describe_embed(embed))
+        if post["kind"] == "видео" and not any(e.get("video") for e in embeds):
+            logging.warning(
+                "[видео] %s — в эмбеде нет блока video, будет статичный кадр: %s",
+                message_id, post["url"],
+            )
+            complaints.append((post, "нет блока video"))
+    return complaints
 
 
 def run():
@@ -285,53 +313,45 @@ def run():
         logging.info("первый запуск: истории нет, беру сегодняшний топ-%s", cfg["count"])
 
     posts = pick_posts(parsed, posted, cfg)
-    logging.info("новых постов к отправке: %s", len(posts))
+    logging.info("постов к отправке: %s (зеркало %s)", len(posts), cfg["link_host"])
     for post in posts:
-        logging.info("  %s  %s — %s", post["id"], post["title"][:58], post["author"])
+        logging.info("  %s  [%-8s]  %s", post["id"], post["kind"], post["title"][:50])
 
     if not posts:
         logging.info("всё из сегодняшнего топа уже отправляли — сообщений не будет")
         return 0
 
-    messages = build_messages(posts, cfg)
-    logging.info("режим «%s»: сообщений к отправке %s", cfg["message_mode"], len(messages))
-
     if dry_run:
-        for text in messages:
-            logging.info("DRY-RUN, не отправляю:\n%s", text)
+        logging.info("DRY-RUN, не отправляю. Шапка: %s", cfg["header"])
+        for post in posts:
+            logging.info("DRY-RUN, не отправляю: %s", post["url"])
         return 0
 
-    sent_ids = []
-    for index, text in enumerate(messages):
-        message_id = send_message(webhook, text, cfg)
-        sent_ids.append(message_id)
-        logging.info("отправлено сообщение %s (%s символов)", message_id, len(text))
-        if index < len(messages) - 1:
+    # Шапка отдельным сообщением, дальше по одной голой ссылке на сообщение:
+    # в общем сообщении Discord схлопывает превью в узкие карточки.
+    send_message(webhook, cfg["header"], cfg)
+    time.sleep(cfg["delay_between_posts"])
+
+    sent = []
+    for index, post in enumerate(posts):
+        message_id = send_message(webhook, post["url"], cfg)
+        sent.append((post, message_id))
+        logging.info("отправлено %s [%s]: %s", message_id, post["kind"], post["url"])
+        if index < len(posts) - 1:
             time.sleep(cfg["delay_between_posts"])
 
-    # Состояние пишем только после успешной отправки.
     posted.extend(p["id"] for p in posts)
     save_posted(posted, cfg["history_size"])
     logging.info("в истории теперь %s постов", len(posted[-cfg["history_size"]:]))
 
-    if cfg["verify_embeds"] and sent_ids:
-        time.sleep(cfg["embed_check_delay"])
-        for message_id in sent_ids:
-            result = count_embeds(webhook, message_id, cfg)
-            if result is None:
-                logging.warning("не смог перечитать сообщение %s для проверки превью", message_id)
-                continue
-            total, kinds = result
-            logging.info(
-                "превью в сообщении %s: %s (%s)",
-                message_id, total,
-                ", ".join("%s×%s" % (v, k) for k, v in sorted(kinds.items())) or "нет",
-            )
-            if total == 0:
-                logging.warning(
-                    "Discord не построил ни одного превью — проверьте, что ссылки идут "
-                    "голыми, без маркдауна, и что у вебхука не отключены превью"
-                )
+    if cfg["verify_embeds"]:
+        complaints = verify(webhook, sent, cfg)
+        if complaints:
+            logging.warning("замечаний по превью: %s", len(complaints))
+            for post, why in complaints:
+                logging.warning("  %s — %s", post["url"], why)
+        else:
+            logging.info("превью в порядке у всех %s сообщений", len(sent))
     return 0
 
 

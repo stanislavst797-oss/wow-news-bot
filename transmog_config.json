@@ -1,12 +1,17 @@
 {
   "feed_url": "https://www.reddit.com/r/Transmogrification/top.rss?t=day",
   "user_agent": "discord-transmog-bot/1.0",
+
   "count": 5,
   "history_size": 500,
-  "header": "**Трансмоги дня · r/Transmogrification**",
-  "message_mode": "single",
+
+  "_комментарий_зеркало": "Домен-переходник. Путь ссылки не меняется, только домен. Ляжет vxreddit — поставьте rxddit.com прямо здесь, код трогать не нужно. К зеркалу ходит сам Discord, бот его не дёргает.",
+  "link_host": "vxreddit.com",
+
+  "header": "Трансмоги дня",
+
   "request_timeout": 30,
   "delay_between_posts": 1.0,
-  "embed_check_delay": 4.0,
+  "embed_check_delay": 6.0,
   "verify_embeds": true
 }
