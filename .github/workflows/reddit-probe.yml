@@ -18,6 +18,10 @@ on:
         description: 'ID уже отправленного сообщения — показать его превью'
         required: false
         default: ''
+      counts_test:
+        description: 'true — проверить, отдаёт ли Reddit счётчики лайков и комментариев'
+        required: false
+        default: ''
 
 jobs:
   probe:
@@ -32,8 +36,45 @@ jobs:
       - name: Install deps
         run: python -m pip install --quiet 'requests~=2.34'
 
+      - name: Есть ли честный источник счётчиков
+        if: ${{ inputs.counts_test != '' }}
+        run: |
+          python - <<'PY'
+          import json, time, requests
+
+          UA = "discord-transmog-bot/1.0"
+          IDS = "t3_1vuuoje,t3_1vup14p,t3_1vuek9b"
+          POST = "https://www.reddit.com/r/Transmogrification/comments/1vuuoje/"
+          tests = [
+              ("by_id (пакетный)", "https://www.reddit.com/by_id/%s.json" % IDS),
+              ("одиночный .json",  POST + ".json"),
+              ("oembed",           "https://www.reddit.com/oembed?url=" + POST),
+          ]
+          for name, url in tests:
+              try:
+                  r = requests.get(url, headers={"User-Agent": UA}, timeout=25)
+              except Exception as exc:
+                  print(f"{name:18s} ОШИБКА {type(exc).__name__}")
+                  continue
+              ctype = (r.headers.get("Content-Type") or "")[:40]
+              print(f"{name:18s} HTTP {r.status_code} | {ctype} | {len(r.content)}b")
+              if r.status_code == 200 and "json" in ctype:
+                  try:
+                      data = r.json()
+                      kids = (data["data"]["children"] if isinstance(data, dict)
+                              else data[0]["data"]["children"])
+                      for kid in kids[:3]:
+                          p = kid["data"]
+                          print(f"    {p['id']} score={p.get('score')} comments={p.get('num_comments')}")
+                  except Exception as exc:
+                      print("    не разобрался:", exc, str(r.text)[:120])
+              else:
+                  print("    тело:", r.text[:110].replace("\n", " "))
+              time.sleep(4)
+          PY
+
       - name: Запрос к Reddit
-        if: ${{ inputs.send_url == '' && inputs.message_id == '' }}
+        if: ${{ inputs.send_url == '' && inputs.message_id == '' && inputs.counts_test == '' }}
         run: |
           python - <<'PY'
           import requests
