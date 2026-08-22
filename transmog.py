@@ -4,21 +4,27 @@
 
 Вебхук читается ТОЛЬКО из переменной окружения TRANSMOG_WEBHOOK.
 
-Формат намеренно минимальный: короткая шапка, дальше каждый пост —
-отдельным сообщением, в теле только голая ссылка. Название, сабреддит,
-автора и голоса Discord рисует сам в карточке, дублировать их текстом
-незачем. Маркдаун в ссылке недопустим: на замаскированную ссылку
-превью не строится.
+Формат намеренно минимальный: короткая шапка, дальше каждый пост
+отдельным сообщением. В карточке только название и само изображение —
+ни текста поста, ни автора, ни счётчиков голосов.
 
-Домен подменяется на зеркало (link_host в конфиге). Это важно не только
-ради видео: по прямой ссылке на reddit.com Discord берёт сгенерированный
-баннер share.redd.it, где работа втиснута в полосу по центру, а вокруг
-впечатаны логотип, название сабреддита и счётчики голосов. Зеркало же
-отдаёт ссылку на исходный файл — картинка чистая, гифка анимируется,
-видео разворачивается плеером.
+Картинки и галереи уходят СВОЕЙ карточкой: заголовок плюс прямая ссылка
+на исходник i.redd.it. Автоматическое превью Discord тут не годится —
+оно тянет ещё og:description, то есть весь текст поста (у трансмогов это
+обычно длинный список шмота), и карточка раздувается.
 
-К зеркалу ходит сам Discord — бот его не дёргает, так что единственный
-сетевой запрос бота за прогон это RSS Reddit.
+Видео уходит голой ссылкой на зеркало (link_host в конфиге): плеер умеет
+строить только автоматическое превью Discord, в собственный эмбед бота
+видео вставить нельзя. Ценой этого в карточке видео остаётся текст
+от зеркала.
+
+Прямые ссылки на reddit.com не годятся ни для чего: Discord берёт у них
+share.redd.it/preview/post/<id> — сгенерированный баннер, где работа
+втиснута в полосу по центру, а вокруг впечатаны логотип, название
+сабреддита и счётчики голосов.
+
+К зеркалу ходит только сам Discord, когда разворачивает ссылку на видео.
+Бот его не дёргает: единственный сетевой запрос бота за прогон — RSS Reddit.
 
 Про Reddit: один запрос в сутки, честный User-Agent, при 429 не долбим,
 а спокойно выходим и пробуем завтра.
@@ -27,6 +33,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -182,6 +189,31 @@ def detect_kind(entry):
     return "картинка"
 
 
+# Прямая ссылка на исходник в ленте есть только у одиночных картинок.
+DIRECT_RE = re.compile(r"href=[\"'](https://i\.redd\.it/[^\"'?]+)")
+# У галерей её нет, но превью лежит под тем же именем файла,
+# поэтому preview.redd.it/<файл> превращается в i.redd.it/<файл>.
+# external-preview сюда намеренно не подходит: там имя закодировано,
+# и это всегда видеопост, который идёт другим путём.
+PREVIEW_RE = re.compile(r"https://preview\.redd\.it/([^\"'?&]+)")
+
+
+def direct_image(entry):
+    """Ссылка на исходный файл работы — без баннеров и подписей."""
+    html = entry_html(entry)
+    match = DIRECT_RE.search(html)
+    if match:
+        return match.group(1)
+    for thumb in entry.get("media_thumbnail") or []:
+        match = PREVIEW_RE.search(thumb.get("url") or "")
+        if match:
+            return "https://i.redd.it/" + match.group(1)
+    match = PREVIEW_RE.search(html)
+    if match:
+        return "https://i.redd.it/" + match.group(1)
+    return ""
+
+
 def mirror_link(link, host):
     """Тот же путь, только домен другой."""
     parts = urlparse(link)
@@ -204,7 +236,11 @@ def pick_posts(parsed, posted, cfg):
                 "id": post_id,
                 "title": (entry.get("title") or "без заголовка").strip(),
                 "kind": kind,
+                # url — через зеркало (для Discord), source_url — оригинал,
+                # на него ведёт заголовок в нашей карточке.
                 "url": mirror_link(link, cfg["link_host"]),
+                "source_url": link,
+                "image": direct_image(entry),
             }
         )
     return chosen
@@ -219,12 +255,14 @@ def _check_fatal(resp, what):
         )
 
 
-def send_message(webhook, content, cfg):
-    """Отправляет одно сообщение, возвращает его id."""
+def send_message(webhook, payload, cfg):
+    """Отправляет одно сообщение (payload как есть), возвращает его id."""
+    body = dict(payload)
+    body.setdefault("allowed_mentions", {"parse": []})
     for attempt in range(1, 4):
         resp = requests.post(
             webhook + "?wait=true",
-            json={"content": content, "allowed_mentions": {"parse": []}},
+            json=body,
             timeout=cfg["request_timeout"],
         )
         _check_fatal(resp, "отправке сообщения")
@@ -338,22 +376,54 @@ def run():
         logging.info("всё из сегодняшнего топа уже отправляли — сообщений не будет")
         return 0
 
+    # Ни одного запроса к зеркалу: картинку берём из самой ленты,
+    # а видео Discord подтянет с зеркала сам, когда развернёт ссылку.
+    for post in posts:
+        if post["kind"] != "видео" and not post["image"]:
+            raise TransmogError(
+                "для %s не нашлось ссылки на исходник в ленте — похоже, Reddit "
+                "сменил разметку записи" % post["id"]
+            )
+
     if dry_run:
         logging.info("DRY-RUN, не отправляю. Шапка: %s", cfg["header"])
         for post in posts:
-            logging.info("DRY-RUN, не отправляю: %s", post["url"])
+            how = "ссылка на зеркало (плеер)" if post["kind"] == "видео" else "своя карточка"
+            logging.info(
+                "DRY-RUN [%s] %s: %s | %s", post["kind"], how,
+                post["title"][:40], (post["image"] or post["url"])[:66],
+            )
         return 0
 
-    # Шапка отдельным сообщением, дальше по одной голой ссылке на сообщение:
+    # Шапка отдельным сообщением, дальше по одному посту на сообщение:
     # в общем сообщении Discord схлопывает превью в узкие карточки.
-    send_message(webhook, cfg["header"], cfg)
+    send_message(webhook, {"content": cfg["header"]}, cfg)
     time.sleep(cfg["delay_between_posts"])
 
     sent = []
     for index, post in enumerate(posts):
-        message_id = send_message(webhook, post["url"], cfg)
+        if post["kind"] == "видео":
+            # Видео умеет проигрывать только автоматическое превью Discord,
+            # в собственный эмбед бота плеер вставить нельзя. Поэтому здесь
+            # шлём голую ссылку и миримся с текстом от зеркала.
+            payload = {"content": post["url"]}
+            how = "ссылка (плеер)"
+        else:
+            # Своя карточка: только название и изображение. Ни описания поста,
+            # ни автора, ни счётчиков — именно от них карточка распухала.
+            payload = {
+                "embeds": [
+                    {
+                        "title": post["title"][:256],
+                        "url": post["source_url"],
+                        "image": {"url": post["image"]},
+                    }
+                ]
+            }
+            how = "своя карточка"
+        message_id = send_message(webhook, payload, cfg)
         sent.append((post, message_id))
-        logging.info("отправлено %s [%s]: %s", message_id, post["kind"], post["url"])
+        logging.info("отправлено %s [%s] %s: %s", message_id, post["kind"], how, post["title"][:44])
         if index < len(posts) - 1:
             time.sleep(cfg["delay_between_posts"])
 
