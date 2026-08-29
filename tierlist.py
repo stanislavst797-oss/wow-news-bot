@@ -22,6 +22,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image, ImageStat
@@ -312,6 +313,43 @@ def save_state(state):
     tmp.replace(STATE_PATH)
 
 
+class SourceGated(Exception):
+    """Сайт закрыт проверкой на человека. Не наша поломка — придём завтра."""
+
+
+# Признаки того, что вместо страницы отдали заглушку антибот-защиты.
+# Проверяем и заголовок, и текст: у Cloudflare это короткая страница
+# с «Human Verification» и кнопкой, у других вариантов формулировки иные.
+GATE_MARKERS = (
+    "human verification",
+    "verifying you are human",
+    "checking your browser",
+    "just a moment",
+    "attention required",
+    "enable javascript and cookies to continue",
+    "one quick check",
+)
+
+
+def detect_gate(page):
+    """Если страница — заглушка проверки, вернуть её заголовок, иначе None.
+
+    Отличать это от смены вёрстки важно: заглушка не наша вина и чинится
+    только со стороны сайта, а вот пропавшие селекторы при живой странице —
+    повод лезть в конфиг.
+    """
+    try:
+        title = (page.title() or "").strip()
+        body = page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 600)")
+    except PlaywrightError:
+        return None
+    haystack = ("%s\n%s" % (title, body)).lower()
+    for marker in GATE_MARKERS:
+        if marker in haystack:
+            return title or marker
+    return None
+
+
 def _assert_not_covered(page, cfg, anchor, name):
     """Убеждается, что поверх будущего кадра не осталось рекламы."""
     bad = page.evaluate(JS_OVERLAP, {"anchor": anchor, "ads": cfg["ad_selectors"]})
@@ -362,6 +400,16 @@ def take_screenshots(cfg, tier_path, rank_path):
                 )
                 page.wait_for_function(JS_IMAGES_READY, arg=sel, timeout=cfg["data_timeout_ms"])
             except PlaywrightTimeout as exc:
+                # Сначала выясняем, страница ли это вообще. Если сайт отдал
+                # заглушку проверки на человека — селекторов там нет и быть
+                # не может, и чинить нам нечего.
+                gate = detect_gate(page)
+                if gate:
+                    raise SourceGated(
+                        "%s закрыт проверкой на человека («%s»). Обходить её бот "
+                        "не будет; попробую снова в следующий прогон"
+                        % (urlparse(cfg["url"]).netloc, gate)
+                    ) from exc
                 stats = page.evaluate(
                     """cfg => {
                         const root = document.querySelector(cfg.section);
@@ -715,7 +763,7 @@ def run():
     state = load_state(targets[0]["role"])
     logging.info("ролей к обработке: %s", len(targets))
 
-    results, failures = [], []
+    results, failures, gated = [], [], []
     for target in targets:
         cfg = resolve_target(shared, target)
         name = cfg["name"]
@@ -724,6 +772,11 @@ def run():
             outcome = process_target(cfg, state, dry_run)
             results.append((name, outcome))
             logging.info("роль «%s»: %s", name, outcome)
+        except SourceGated as exc:
+            # Сайт закрыт проверкой на человека. Это не наша поломка и не
+            # повод красить прогон: завтра попробуем снова.
+            gated.append((name, exc))
+            logging.info("роль «%s» пропущена: %s", name, exc)
         except Exception as exc:
             # Одна упавшая роль не должна отменять остальные, но и молча
             # проглотить её нельзя — соберём и подсветим в конце.
@@ -733,11 +786,21 @@ def run():
     logging.info("итог: успешно %s из %s", len(results), len(targets))
     for name, outcome in results:
         logging.info("  ok  %s — %s", name, outcome)
+    for name, exc in gated:
+        logging.info("  ждём  %s — %s", name, exc)
+
     if failures:
         for name, exc in failures:
             logging.error("  СБОЙ %s — %s", name, exc)
         logging.error("ролей с ошибкой: %s из %s", len(failures), len(targets))
         return 1
+
+    if gated and not results:
+        logging.info(
+            "все роли закрыты проверкой на человека — картинки не обновлены, "
+            "прежние сообщения в канале остались. Бот сам продолжит пробовать "
+            "каждый день и обновит их, как только сайт откроется"
+        )
     return 0
 
 
