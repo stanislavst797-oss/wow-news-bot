@@ -25,7 +25,9 @@ POSTED_PATH = ROOT / "posted.json"
 DEFAULTS = {
     "feed_url": "https://www.noob-club.ru/rss2.xml",
     "stop_words": [],
-    "max_per_run": 5,
+    # В ленте noob-club всего 10 записей: за прогон забираем её целиком,
+    # иначе остаток может выпасть из ленты раньше следующего прогона.
+    "max_per_run": 10,
     "history_size": 500,
     "description_limit": 300,
     "embed_color": 10038562,
@@ -52,6 +54,21 @@ FATAL_WEBHOOK_CODES = (401, 403, 404)
 
 class WebhookBroken(Exception):
     """Вебхук нерабочий — чинится только заменой секрета DISCORD_WEBHOOK."""
+
+
+class FeedUnavailable(Exception):
+    """Временная беда: сеть, таймаут, 429, 5xx. Прогон зелёный, повторим позже."""
+
+
+class FeedBroken(Exception):
+    """Источник ответил, но не лентой: HTML, капча, 4xx, пустая лента.
+
+    Само это не пройдёт, поэтому прогон должен покраснеть — иначе блокировка
+    или переезд ленты убьют бота молча.
+    """
+
+
+HTML_MARKER_RE = re.compile(r"<!doctype\s+html|<html[\s>]", re.IGNORECASE)
 
 
 def setup_logging():
@@ -105,21 +122,58 @@ def save_posted(links, history_size):
     tmp.replace(POSTED_PATH)
 
 
+def _body_head(resp, size=200):
+    return resp.text[:size].replace("\n", " ").strip()
+
+
 def fetch_feed(cfg):
-    """Скачивает и парсит ленту. Кидает исключение при любой проблеме."""
-    resp = requests.get(
-        cfg["feed_url"],
-        headers={
-            "User-Agent": cfg["user_agent"],
-            "Accept": "application/rss+xml, application/xml, text/xml, */*",
-            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        },
-        timeout=cfg["request_timeout"],
-    )
-    resp.raise_for_status()
+    """Скачивает и парсит ленту.
+
+    FeedUnavailable — временная беда (сеть, таймаут, 429, 5xx).
+    FeedBroken — источник отдал не ленту (HTML, капча, 4xx, пусто).
+    """
+    try:
+        resp = requests.get(
+            cfg["feed_url"],
+            headers={
+                "User-Agent": cfg["user_agent"],
+                "Accept": "application/rss+xml, application/xml, text/xml, */*",
+                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+            },
+            timeout=cfg["request_timeout"],
+        )
+    except requests.RequestException as exc:  # сеть, DNS, таймаут
+        raise FeedUnavailable("не достучался до источника: %s" % exc) from exc
+
+    code = resp.status_code
+    if code == 429:
+        raise FeedUnavailable("источник ответил 429 (Retry-After: %s)"
+                              % resp.headers.get("Retry-After", "не указан"))
+    if code >= 500:
+        raise FeedUnavailable("источник ответил %s" % code)
+    if not (200 <= code < 300):
+        raise FeedBroken(
+            "источник ответил %s — похоже на блокировку или переезд ленты. Тело: %s"
+            % (code, _body_head(resp))
+        )
+
+    ctype = resp.headers.get("Content-Type", "")
+    if "xml" not in ctype.lower() and "rss" not in ctype.lower():
+        raise FeedBroken(
+            "источник вернул «%s» вместо RSS — похоже на заглушку, капчу или "
+            "проверку на человека. Начало тела: %s" % (ctype or "без Content-Type", _body_head(resp))
+        )
+    if HTML_MARKER_RE.search(resp.text[:1000]):
+        raise FeedBroken(
+            "в ответе HTML-страница вместо RSS (Content-Type «%s») — похоже на "
+            "заглушку или капчу. Начало тела: %s" % (ctype, _body_head(resp))
+        )
+
     parsed = feedparser.parse(resp.content)
-    if parsed.bozo and not parsed.entries:
-        raise ValueError("лента не распарсилась: %s" % parsed.bozo_exception)
+    if not parsed.entries:
+        if parsed.bozo:
+            raise FeedBroken("лента не распарсилась: %s" % parsed.bozo_exception)
+        raise FeedBroken("источник отдал ленту без единой записи")
     return parsed
 
 
@@ -265,20 +319,32 @@ def run():
 
     try:
         parsed = fetch_feed(cfg)
-    except Exception as exc:  # сеть, 403, таймаут, битый XML
-        logging.error("лента недоступна (%s) — выхожу с кодом 0, повторю в следующий прогон", exc)
+    except FeedUnavailable as exc:
+        logging.warning("лента недоступна (%s) — выхожу с кодом 0, повторю в следующий прогон", exc)
         return 0
+    except FeedBroken as exc:
+        # Само не пройдёт: красный прогон и письмо от GitHub — это и есть цель.
+        logging.error("%s", exc)
+        return 1
 
     entries = [e for e in parsed.entries if e.get("link")]
     logging.info("записей в ленте: %s", len(entries))
     if not entries:
-        return 0
+        logging.error("в ленте %s записей, но ни у одной нет ссылки — разметка ленты сменилась",
+                      len(parsed.entries))
+        return 1
 
     posted, first_run = load_posted()
 
+    def persist(links):
+        # В DRY_RUN состояние не трогаем: иначе ничего не отправленные новости
+        # окажутся помечены отправленными и настоящий прогон их пропустит.
+        if not dry_run:
+            save_posted(links, cfg["history_size"])
+
     if first_run:
         links = [e["link"] for e in entries]
-        save_posted(links, cfg["history_size"])
+        persist(links)
         logging.info(
             "первый запуск: пометил %s текущих ссылок отправленными, архивом не спамлю",
             len(links),
@@ -288,6 +354,15 @@ def run():
     known = set(posted)
     fresh = [e for e in entries if e["link"] not in known]
     logging.info("новых записей: %s", len(fresh))
+    if len(fresh) == len(entries):
+        # Ни одной знакомой записи: самая старая новость ленты тоже новая,
+        # значит, всё, что вышло до неё, из ленты уже выпало и мы его не видели.
+        logging.warning("все %s записей ленты новые", len(entries))
+        print(
+            "::warning::все %s записей ленты новые — между прогонами лента могла "
+            "переполниться, часть новостей могла пропасть" % len(entries),
+            flush=True,
+        )
 
     to_send = []
     for entry in reversed(fresh):  # от старых к новым, чтобы в канале был хронологический порядок
@@ -311,7 +386,7 @@ def run():
         except WebhookBroken as exc:
             # Молчать нельзя: пусть прогон будет красным и GitHub пришлёт уведомление.
             logging.error("%s", exc)
-            save_posted(posted, cfg["history_size"])
+            persist(posted)
             logging.error("отправлено до сбоя: %s", sent)
             return 1
         if not ok:
@@ -319,12 +394,12 @@ def run():
             break
         sent += 1
         posted.append(entry["link"])
-        save_posted(posted, cfg["history_size"])  # состояние переживёт падение на середине
+        persist(posted)  # состояние переживёт падение на середине
         logging.info("отправлено: %s", (entry.get("title") or "")[:90])
         if index < len(to_send) - 1:
             time.sleep(cfg["delay_between_posts"])
 
-    save_posted(posted, cfg["history_size"])
+    persist(posted)
     logging.info("итог: отправлено %s, в истории %s ссылок", sent, len(posted[-cfg["history_size"]:]))
     return 0
 
@@ -334,8 +409,9 @@ def main():
     try:
         return run()
     except Exception:
-        logging.exception("непредвиденная ошибка — job не роняю")
-        return 0
+        # Это баг в боте, а не капризы источника: его надо видеть.
+        logging.exception("непредвиденная ошибка — прогон будет красным")
+        return 1
 
 
 if __name__ == "__main__":

@@ -3,8 +3,9 @@ name: WoW news to Discord
 on:
   schedule:
     # 5 минут — минимально допустимый интервал в GitHub Actions.
-    # Расписание тут best-effort: часть срабатываний GitHub пропускает,
-    # поэтому чем чаще просим, тем меньше реальная задержка.
+    # Расписание тут best-effort: на деле GitHub запускал бота 3–4 раза
+    # в сутки. Основной запуск — внешний таймер (cron-job.org) каждые
+    # 10 минут через workflow_dispatch, этот cron — запасной.
     - cron: '*/5 * * * *'
   workflow_dispatch:
 

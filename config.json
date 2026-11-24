@@ -11,7 +11,7 @@
     "Старкрафт",
     "Rumble"
   ],
-  "max_per_run": 5,
+  "max_per_run": 10,
   "history_size": 500,
   "description_limit": 300,
   "embed_color": 10038562,

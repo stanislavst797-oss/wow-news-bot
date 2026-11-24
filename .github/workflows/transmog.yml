@@ -2,10 +2,18 @@ name: Transmog digest to Discord
 
 on:
   schedule:
-    # Раз в сутки в 12:00 UTC (15:00 МСК): к этому времени дневное
-    # голосование на Reddit устаканивается. Ровно один запрос к Reddit за прогон.
-    - cron: '0 12 * * *'
+    # Запасной запуск. Основной — внешний таймер (cron-job.org) в 12:00 UTC
+    # через workflow_dispatch: cron GitHub на деле срабатывает с опозданием
+    # на часы. Минуты не круглые — ровный час у GitHub самый загруженный.
+    # Вторую подборку за день бот не отправит: дата последней подборки
+    # хранится в transmog_posted.json.
+    - cron: '23 11 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: "true — отправить подборку, даже если сегодня она уже была"
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -38,6 +46,8 @@ jobs:
       - name: Run transmog bot
         env:
           TRANSMOG_WEBHOOK: ${{ secrets.TRANSMOG_WEBHOOK }}
+          # У запусков по расписанию inputs пустые — значит, не force.
+          FORCE: ${{ inputs.force }}
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
         run: python transmog.py

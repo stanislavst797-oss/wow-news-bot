@@ -39,6 +39,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -129,23 +130,34 @@ def load_config():
 
 
 def load_posted():
+    """Возвращает (id_постов, дата_последней_подборки_или_None, первый_запуск).
+
+    Понимает оба формата: старый — голый список id, новый —
+    {"posted": [...], "last_digest_date": "YYYY-MM-DD"}.
+    """
     if not POSTED_PATH.exists():
-        return [], True
+        return [], None, True
     try:
         with POSTED_PATH.open(encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError) as exc:
         logging.warning("transmog_posted.json повреждён (%s) — считаю его пустым", exc)
-        return [], False
+        return [], None, False
+    last_date = None
     if isinstance(data, dict):
+        raw_date = data.get("last_digest_date")
+        if isinstance(raw_date, str) and raw_date.strip():
+            last_date = raw_date.strip()
         data = data.get("posted", [])
     if not isinstance(data, list):
-        return [], False
-    return [str(x) for x in data], False
+        return [], last_date, False
+    return [str(x) for x in data], last_date, False
 
 
-def save_posted(ids, history_size):
+def save_posted(ids, history_size, last_digest_date=None):
     payload = {"posted": ids[-history_size:]}
+    if last_digest_date:
+        payload["last_digest_date"] = last_digest_date
     tmp = POSTED_PATH.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
@@ -483,6 +495,18 @@ def run():
     if not webhook and not dry_run:
         raise TransmogError("нет переменной окружения TRANSMOG_WEBHOOK — отправлять некуда")
 
+    # Запусков два — внешний таймер и запасной cron GitHub. Подборка нужна
+    # одна в сутки (по UTC), поэтому второй прогон выходит, не трогая Reddit.
+    today = datetime.now(timezone.utc).date().isoformat()
+    force = os.environ.get("FORCE", "").strip().lower() in ("1", "true", "yes")
+    posted, last_date, first_run = load_posted()
+    if last_date == today:
+        if not force:
+            logging.info("подборка за сегодня уже была (%s UTC) — выхожу, Reddit не трогаю. "
+                         "Отправить ещё одну: FORCE=1", today)
+            return 0
+        logging.info("FORCE=1: подборка за сегодня уже была, но отправляю ещё одну")
+
     try:
         parsed = fetch_feed(cfg)
     except RedditBusy as exc:
@@ -491,7 +515,6 @@ def run():
 
     logging.info("в ленте постов: %s", len(parsed.entries))
 
-    posted, first_run = load_posted()
     if first_run:
         # Архивом это не грозит: за прогон уходит не больше cfg["count"] постов.
         logging.info("первый запуск: истории нет, беру сегодняшний топ-%s", cfg["count"])
@@ -534,13 +557,16 @@ def run():
         payload, how = card_style(post, cfg)
         message_id = send_message(webhook, payload, cfg)
         sent.append((post, message_id))
+        # Сохраняем после каждого поста вместе с датой: если прогон упадёт
+        # на середине, запасной запуск не отправит вторую подборку за день.
+        posted.append(post["id"])
+        save_posted(posted, cfg["history_size"], today)
         logging.info("отправлено %s [%s] %s: %s", message_id, post["kind"], how, post["title"][:44])
         if index < len(posts) - 1:
             time.sleep(cfg["delay_between_posts"])
 
-    posted.extend(p["id"] for p in posts)
-    save_posted(posted, cfg["history_size"])
-    logging.info("в истории теперь %s постов", len(posted[-cfg["history_size"]:]))
+    logging.info("в истории теперь %s постов, подборка за %s отмечена",
+                 len(posted[-cfg["history_size"]:]), today)
 
     if cfg["card_mode"] == "clean":
         time.sleep(cfg["embed_check_delay"])
