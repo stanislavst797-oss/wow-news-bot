@@ -34,10 +34,10 @@ DEFAULTS = {
     "footer_text": "noob-club.ru",
     "delay_between_posts": 1.0,
     "request_timeout": 30,
-    "user_agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    # Честный User-Agent: бот представляется ботом и даёт ссылку на себя.
+    # Под браузер не маскируемся — если сайт начнёт резать ботов, это повод
+    # договариваться или менять источник, а не прятаться.
+    "user_agent": "wow-news-bot/1.0 (+https://github.com/stanislavst797-oss/wow-news-bot)",
 }
 
 # Хвост, который сайт клеит в конец каждого анонса.
